@@ -25,13 +25,8 @@ public:
 
     void registerSystems(ecs::SystemScheduler& scheduler) override
     {
-        ecs::SystemScheduler::SystemDesc lifetime{};
-        lifetime.name = "lifetime.update";
-        lifetime.phase = ecs::SystemPhase::PreSimulation;
-        lifetime.reads = {};
-        lifetime.writes = { ecs::SystemScheduler::typeOf<ecs::Lifetime>(), ecs::SystemScheduler::typeOf<ecs::RenderVisibility>() };
-        lifetime.run = [](ecs::World& world, const ecs::SystemFrameContext& context) {
-            world.view<ecs::Lifetime, ecs::RenderVisibility>().each(
+        scheduler.addSystem<ecs::TypeList<>, ecs::TypeList<ecs::Lifetime, ecs::RenderVisibility>>("lifetime.update", ecs::SystemPhase::PreSimulation, [](auto& world, const ecs::SystemFrameContext& context) {
+            world.template view<ecs::Lifetime, ecs::RenderVisibility>().each(
                 [&](ecs::Entity, ecs::Lifetime& life, ecs::RenderVisibility& visibility) {
                     if (life.secondsRemaining < 0.0F) {
                         return;
@@ -41,39 +36,26 @@ public:
                         visibility.visible = false;
                     }
                 });
-        };
-        scheduler.addSystem(std::move(lifetime));
+        });
 
-        ecs::SystemScheduler::SystemDesc translate{};
-        translate.name = "transform.translate";
-        translate.phase = ecs::SystemPhase::Simulation;
-        translate.reads = { ecs::SystemScheduler::typeOf<ecs::LinearVelocity>() };
-        translate.writes = { ecs::SystemScheduler::typeOf<ecs::Transform>() };
-        translate.run = [](ecs::World& world, const ecs::SystemFrameContext& context) {
-            world.view<ecs::Transform, ecs::LinearVelocity>().each(
+        scheduler.addSystem<ecs::TypeList<ecs::LinearVelocity>, ecs::TypeList<ecs::Transform>>("transform.translate", ecs::SystemPhase::Simulation, [](auto& world, const ecs::SystemFrameContext& context) {
+            world.template view<ecs::Transform, const ecs::LinearVelocity>().each(
                 [&](ecs::Entity, ecs::Transform& transform, const ecs::LinearVelocity& velocity) {
                     for (size_t axis = 0; axis < 3; ++axis) {
                         transform.position[axis] += velocity.unitsPerSecond[axis] * context.deltaSeconds;
                     }
                 });
-        };
-        scheduler.addSystem(std::move(translate));
+        });
 
-        ecs::SystemScheduler::SystemDesc rotate{};
-        rotate.name = "transform.rotate";
-        rotate.phase = ecs::SystemPhase::Simulation;
-        rotate.reads = { ecs::SystemScheduler::typeOf<ecs::AngularVelocity>() };
-        rotate.writes = { ecs::SystemScheduler::typeOf<ecs::Transform>() };
-        rotate.run = [](ecs::World& world, const ecs::SystemFrameContext& context) {
-            world.view<ecs::Transform, ecs::AngularVelocity>().each(
+        scheduler.addSystem<ecs::TypeList<ecs::AngularVelocity>, ecs::TypeList<ecs::Transform>>("transform.rotate", ecs::SystemPhase::Simulation, [](auto& world, const ecs::SystemFrameContext& context) {
+            world.template view<ecs::Transform, const ecs::AngularVelocity>().each(
                 [&](ecs::Entity, ecs::Transform& transform, const ecs::AngularVelocity& velocity) {
                     for (size_t axis = 0; axis < 3; ++axis) {
                         transform.rotationEulerRadians[axis] += velocity.radiansPerSecond[axis] * context.deltaSeconds;
                     }
                     transform.rotationEulerRadians[2] = std::fmod(transform.rotationEulerRadians[2], kTwoPi);
                 });
-        };
-        scheduler.addSystem(std::move(rotate));
+        });
     }
 };
 
