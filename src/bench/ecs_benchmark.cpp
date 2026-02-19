@@ -63,30 +63,18 @@ int main(int argc, char** argv)
     ecs::SystemScheduler scheduler{};
     scheduler.setMaxWorkerThreads(std::max<uint32_t>(1u, std::thread::hardware_concurrency()));
 
-    ecs::SystemScheduler::SystemDesc translate{};
-    translate.name = "bench.translate";
-    translate.phase = ecs::SystemPhase::Simulation;
-    translate.reads = { ecs::SystemScheduler::typeOf<ecs::LinearVelocity>() };
-    translate.writes = { ecs::SystemScheduler::typeOf<ecs::Transform>() };
-    translate.run = [](ecs::World& w, const ecs::SystemFrameContext& ctx) {
-        w.view<ecs::Transform, ecs::LinearVelocity>().each([&](ecs::Entity, ecs::Transform& t, const ecs::LinearVelocity& v) {
+    scheduler.addSystem<ecs::TypeList<ecs::LinearVelocity>, ecs::TypeList<ecs::Transform>>("bench.translate", ecs::SystemPhase::Simulation, [](auto& w, const ecs::SystemFrameContext& ctx) {
+        w.template view<ecs::Transform, const ecs::LinearVelocity>().each([&](ecs::Entity, ecs::Transform& t, const ecs::LinearVelocity& v) {
             t.position[0] += v.unitsPerSecond[0] * ctx.deltaSeconds;
             t.position[1] += v.unitsPerSecond[1] * ctx.deltaSeconds;
         });
-    };
-    scheduler.addSystem(std::move(translate));
+    });
 
-    ecs::SystemScheduler::SystemDesc rotate{};
-    rotate.name = "bench.rotate";
-    rotate.phase = ecs::SystemPhase::Simulation;
-    rotate.reads = { ecs::SystemScheduler::typeOf<ecs::AngularVelocity>() };
-    rotate.writes = { ecs::SystemScheduler::typeOf<ecs::Transform>() };
-    rotate.run = [](ecs::World& w, const ecs::SystemFrameContext& ctx) {
-        w.view<ecs::Transform, ecs::AngularVelocity>().each([&](ecs::Entity, ecs::Transform& t, const ecs::AngularVelocity& v) {
+    scheduler.addSystem<ecs::TypeList<ecs::AngularVelocity>, ecs::TypeList<ecs::Transform>>("bench.rotate", ecs::SystemPhase::Simulation, [](auto& w, const ecs::SystemFrameContext& ctx) {
+        w.template view<ecs::Transform, const ecs::AngularVelocity>().each([&](ecs::Entity, ecs::Transform& t, const ecs::AngularVelocity& v) {
             t.rotationEulerRadians[2] += v.radiansPerSecond[2] * ctx.deltaSeconds;
         });
-    };
-    scheduler.addSystem(std::move(rotate));
+    });
 
     const auto begin = std::chrono::steady_clock::now();
     for (uint32_t frame = 0; frame < frames; ++frame) {

@@ -2,9 +2,10 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <functional>
+#include <memory>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <typeindex>
 #include <unordered_set>
 #include <utility>
@@ -27,18 +28,22 @@ struct SystemFrameContext {
 
 class SystemScheduler {
 public:
-    struct SystemDesc {
-        std::string name{};
-        SystemPhase phase{ SystemPhase::Simulation };
-        std::vector<std::type_index> reads{};
-        std::vector<std::type_index> writes{};
-        std::function<void(World&, const SystemFrameContext&)> run{};
-    };
-
     template <typename T>
     static std::type_index typeOf()
     {
-        return std::type_index(typeid(T));
+        return std::type_index(typeid(std::remove_cv_t<T>));
+    }
+
+    template <typename ReadList, typename WriteList, typename Fn>
+    void addSystem(std::string name, SystemPhase phase, Fn&& fn)
+    {
+        SystemDesc desc{};
+        desc.name = std::move(name);
+        desc.phase = phase;
+        appendTypeList<ReadList>(desc.reads);
+        appendTypeList<WriteList>(desc.writes);
+        desc.runner = std::make_unique<SystemRunnerModel<ReadList, WriteList, std::decay_t<Fn>>>(std::forward<Fn>(fn));
+        systems_.push_back(std::move(desc));
     }
 
     void clear() { systems_.clear(); }
@@ -46,11 +51,6 @@ public:
     void setMaxWorkerThreads(uint32_t workers)
     {
         maxWorkerThreads_ = std::max<uint32_t>(1u, workers);
-    }
-
-    void addSystem(SystemDesc desc)
-    {
-        systems_.push_back(std::move(desc));
     }
 
     void execute(World& world, const SystemFrameContext& context) const
@@ -61,6 +61,78 @@ public:
     }
 
 private:
+    struct SystemRunner {
+        virtual ~SystemRunner() = default;
+        virtual void run(World& world, const SystemFrameContext& context) = 0;
+    };
+
+    template <typename ReadList, typename WriteList, typename Fn>
+    class SystemRunnerModel final : public SystemRunner {
+    public:
+        explicit SystemRunnerModel(Fn fn)
+            : fn_(std::move(fn))
+        {
+        }
+
+        void run(World& world, const SystemFrameContext& context) override
+        {
+            RestrictedWorld<ReadList, WriteList> access(world);
+            fn_(access, context);
+        }
+
+    private:
+        Fn fn_;
+    };
+
+    template <typename List>
+    struct TypeListAppender;
+
+    template <typename... Ts>
+    struct TypeListAppender<TypeList<Ts...>> {
+        static void append(std::vector<std::type_index>& out)
+        {
+            (out.push_back(typeOf<Ts>()), ...);
+        }
+    };
+
+    template <typename List>
+    static void appendTypeList(std::vector<std::type_index>& out)
+    {
+        TypeListAppender<List>::append(out);
+    }
+
+    struct SystemDesc {
+        std::string name{};
+        SystemPhase phase{ SystemPhase::Simulation };
+        std::vector<std::type_index> reads{};
+        std::vector<std::type_index> writes{};
+        std::unique_ptr<SystemRunner> runner{};
+    };
+
+    class SystemAccessScope {
+    public:
+        SystemAccessScope(World& world, const SystemDesc& system)
+            : world_(world)
+        {
+            world_.installSystemAccessContext(World::SystemAccessDeclaration{
+                .systemName = system.name,
+                .reads = &system.reads,
+                .writes = &system.writes,
+            });
+        }
+
+        ~SystemAccessScope()
+        {
+            world_.clearSystemAccessContext();
+        }
+
+        SystemAccessScope(const SystemAccessScope&) = delete;
+        SystemAccessScope& operator=(const SystemAccessScope&) = delete;
+
+    private:
+        World& world_;
+    };
+
     static bool anyShared(const std::vector<std::type_index>& lhs, const std::vector<std::type_index>& rhs)
     {
         std::unordered_set<std::type_index> set(lhs.begin(), lhs.end());
@@ -81,7 +153,7 @@ private:
     {
         std::vector<std::vector<size_t>> batches{};
         for (size_t i = 0; i < systems_.size(); ++i) {
-            if (systems_[i].phase != phase || !systems_[i].run) {
+            if (systems_[i].phase != phase || systems_[i].runner == nullptr) {
                 continue;
             }
 
@@ -109,6 +181,12 @@ private:
         return batches;
     }
 
+    static void runSystem(World& world, const SystemFrameContext& context, const SystemDesc& system)
+    {
+        SystemAccessScope scope(world, system);
+        system.runner->run(world, context);
+    }
+
     void executeBatch(World& world, const SystemFrameContext& context, const std::vector<size_t>& batch) const
     {
         const uint32_t hw = std::max<uint32_t>(1u, std::thread::hardware_concurrency());
@@ -116,7 +194,7 @@ private:
         const uint32_t workers = std::min<uint32_t>(workerLimit, static_cast<uint32_t>(batch.size()));
         if (workers <= 1u) {
             for (const size_t index : batch) {
-                systems_[index].run(world, context);
+                runSystem(world, context, systems_[index]);
             }
             return;
         }
@@ -126,7 +204,7 @@ private:
         for (uint32_t worker = 0; worker < workers; ++worker) {
             threads.emplace_back([&, worker]() {
                 for (size_t i = worker; i < batch.size(); i += workers) {
-                    systems_[batch[i]].run(world, context);
+                    runSystem(world, context, systems_[batch[i]]);
                 }
             });
         }

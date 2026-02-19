@@ -1,14 +1,18 @@
 #pragma once
 
 #include <array>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <string_view>
+#include <optional>
 #include <tuple>
 #include <type_traits>
 #include <typeindex>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -23,6 +27,12 @@ struct Entity {
 
 class World {
 public:
+    struct SystemAccessDeclaration {
+        std::string_view systemName{};
+        const std::vector<std::type_index>* reads{ nullptr };
+        const std::vector<std::type_index>* writes{ nullptr };
+    };
+
     class ComponentStoreBase {
     public:
         virtual ~ComponentStoreBase() = default;
@@ -234,55 +244,88 @@ public:
     template <typename T>
     bool add(Entity entity, T value)
     {
+        using Component = std::remove_cv_t<T>;
+        assertWriteAccess<Component>();
         if (!isAlive(entity)) {
             return false;
         }
-        return componentStore<T>().add(entity, std::move(value));
+        return componentStore<Component>().add(entity, std::move(value));
     }
 
     template <typename T>
     bool remove(Entity entity)
     {
+        using Component = std::remove_cv_t<T>;
+        assertWriteAccess<Component>();
         if (!isAlive(entity)) {
             return false;
         }
-        return componentStore<T>().remove(entity);
+        return componentStore<Component>().remove(entity);
     }
 
     template <typename T>
     [[nodiscard]] bool has(Entity entity) const
     {
+        using Component = std::remove_cv_t<T>;
         if (!isAlive(entity)) {
             return false;
         }
-        const auto* store = tryGetStore<T>();
+        const auto* store = tryGetStore<Component>();
         return store != nullptr && store->has(entity);
     }
 
     template <typename T>
     [[nodiscard]] T* get(Entity entity)
     {
+        using Component = std::remove_cv_t<T>;
+        assertWriteAccess<Component>();
         if (!isAlive(entity)) {
             return nullptr;
         }
-        auto* store = tryGetStore<T>();
+        auto* store = tryGetStore<Component>();
         return store != nullptr ? store->get(entity) : nullptr;
     }
 
     template <typename T>
     [[nodiscard]] const T* get(Entity entity) const
     {
+        using Component = std::remove_cv_t<T>;
+        assertReadAccess<Component>();
         if (!isAlive(entity)) {
             return nullptr;
         }
-        const auto* store = tryGetStore<T>();
+        const auto* store = tryGetStore<Component>();
         return store != nullptr ? store->get(entity) : nullptr;
+    }
+
+    void installSystemAccessContext(const SystemAccessDeclaration& declaration)
+    {
+#ifndef NDEBUG
+        SystemAccessContext context{};
+        context.systemName = declaration.systemName;
+        if (declaration.reads != nullptr) {
+            context.reads.insert(declaration.reads->begin(), declaration.reads->end());
+        }
+        if (declaration.writes != nullptr) {
+            context.writes.insert(declaration.writes->begin(), declaration.writes->end());
+        }
+        currentSystemAccessContext() = std::move(context);
+#else
+        (void)declaration;
+#endif
+    }
+
+    void clearSystemAccessContext()
+    {
+#ifndef NDEBUG
+        currentSystemAccessContext().reset();
+#endif
     }
 
     template <typename T>
     void reserve(size_t capacity)
     {
-        componentStore<T>().reserve(capacity);
+        componentStore<std::remove_cv_t<T>>().reserve(capacity);
     }
 
     template <typename... Components>
@@ -310,6 +353,45 @@ public:
     }
 
 private:
+    struct SystemAccessContext {
+        std::string_view systemName{};
+        std::unordered_set<std::type_index> reads{};
+        std::unordered_set<std::type_index> writes{};
+    };
+
+    static std::optional<SystemAccessContext>& currentSystemAccessContext()
+    {
+        static thread_local std::optional<SystemAccessContext> context{};
+        return context;
+    }
+
+    template <typename T>
+    static void assertReadAccess()
+    {
+#ifndef NDEBUG
+        auto& context = currentSystemAccessContext();
+        if (!context.has_value()) {
+            return;
+        }
+        const std::type_index type(typeid(std::remove_cv_t<T>));
+        const bool readable = context->reads.contains(type) || context->writes.contains(type);
+        assert(readable && "System read undeclared component type");
+#endif
+    }
+
+    template <typename T>
+    static void assertWriteAccess()
+    {
+#ifndef NDEBUG
+        auto& context = currentSystemAccessContext();
+        if (!context.has_value()) {
+            return;
+        }
+        const std::type_index type(typeid(std::remove_cv_t<T>));
+        assert(context->writes.contains(type) && "System wrote undeclared component type");
+#endif
+    }
+
     template <typename T>
     ComponentStore<T>& componentStore()
     {
@@ -348,7 +430,7 @@ private:
     [[nodiscard]] const ComponentStoreBase* smallestStore() const
     {
         std::array<const ComponentStoreBase*, sizeof...(Components)> stores{
-            static_cast<const ComponentStoreBase*>(tryGetStore<Components>())...
+            static_cast<const ComponentStoreBase*>(tryGetStore<std::remove_const_t<Components>>())...
         };
 
         const ComponentStoreBase* smallest = nullptr;
@@ -375,7 +457,7 @@ private:
         bool executed = false;
         auto tryExecute = [&](auto tag) {
             using C = typename decltype(tag)::type;
-            if (!executed && smallest == static_cast<const ComponentStoreBase*>(tryGetStore<C>())) {
+            if (!executed && smallest == static_cast<const ComponentStoreBase*>(tryGetStore<std::remove_const_t<C>>())) {
                 forEachFromStore<C, Components...>(std::forward<Fn>(fn));
                 executed = true;
             }
@@ -395,7 +477,7 @@ private:
         bool executed = false;
         auto tryExecute = [&](auto tag) {
             using C = typename decltype(tag)::type;
-            if (!executed && smallest == static_cast<const ComponentStoreBase*>(tryGetStore<C>())) {
+            if (!executed && smallest == static_cast<const ComponentStoreBase*>(tryGetStore<std::remove_const_t<C>>())) {
                 forEachFromStoreConst<C, Components...>(std::forward<Fn>(fn));
                 executed = true;
             }
@@ -406,7 +488,7 @@ private:
     template <typename Primary, typename... Components, typename Fn>
     void forEachFromStore(Fn&& fn)
     {
-        const auto* primaryStore = tryGetStore<Primary>();
+        const auto* primaryStore = tryGetStore<std::remove_const_t<Primary>>();
         if (primaryStore == nullptr) {
             return;
         }
@@ -415,8 +497,8 @@ private:
             if (!isAlive(entity)) {
                 continue;
             }
-            if ((has<Components>(entity) && ...)) {
-                fn(entity, *get<Components>(entity)...);
+            if ((has<std::remove_const_t<Components>>(entity) && ...)) {
+                fn(entity, *resolveViewComponentPtr<Components>(entity)...);
             }
         }
     }
@@ -424,7 +506,7 @@ private:
     template <typename Primary, typename... Components, typename Fn>
     void forEachFromStoreConst(Fn&& fn) const
     {
-        const auto* primaryStore = tryGetStore<Primary>();
+        const auto* primaryStore = tryGetStore<std::remove_const_t<Primary>>();
         if (primaryStore == nullptr) {
             return;
         }
@@ -433,9 +515,20 @@ private:
             if (!isAlive(entity)) {
                 continue;
             }
-            if ((has<Components>(entity) && ...)) {
-                fn(entity, *get<Components>(entity)...);
+            if ((has<std::remove_const_t<Components>>(entity) && ...)) {
+                fn(entity, *get<std::remove_const_t<Components>>(entity)...);
             }
+        }
+    }
+
+    template <typename Component>
+    auto resolveViewComponentPtr(Entity entity)
+    {
+        using Base = std::remove_const_t<Component>;
+        if constexpr (std::is_const_v<Component>) {
+            return static_cast<const Base*>(static_cast<const World*>(this)->get<Base>(entity));
+        } else {
+            return get<Base>(entity);
         }
     }
 
@@ -443,6 +536,111 @@ private:
     std::vector<bool> alive_{};
     std::vector<uint32_t> freeList_{};
     std::unordered_map<std::type_index, std::unique_ptr<ComponentStoreBase>> componentStores_{};
+};
+
+
+
+template <typename... Components>
+struct TypeList {};
+
+template <typename T, typename List>
+struct TypeListContains;
+
+template <typename T, typename... Components>
+struct TypeListContains<T, TypeList<Components...>> : std::bool_constant<(std::is_same_v<T, Components> || ...)> {};
+
+template <typename ReadList, typename WriteList>
+class RestrictedWorld;
+
+template <typename... Reads, typename... Writes>
+class RestrictedWorld<TypeList<Reads...>, TypeList<Writes...>> {
+public:
+    explicit RestrictedWorld(World& world)
+        : world_(world)
+    {
+    }
+
+    [[nodiscard]] bool isAlive(Entity entity) const { return world_.isAlive(entity); }
+
+    template <typename T>
+    [[nodiscard]] bool has(Entity entity) const
+    {
+        using Component = std::remove_cv_t<T>;
+        static_assert(canRead<Component>(), "Component type not declared in reads/writes");
+        return world_.has<Component>(entity);
+    }
+
+    template <typename T>
+    [[nodiscard]] const T* get(Entity entity) const
+    {
+        using Component = std::remove_cv_t<T>;
+        static_assert(canRead<Component>(), "Component type not declared in reads/writes");
+        return world_.get<Component>(entity);
+    }
+
+    template <typename T>
+    [[nodiscard]] T* getMutable(Entity entity)
+    {
+        using Component = std::remove_cv_t<T>;
+        static_assert(canWrite<Component>(), "Component type not declared in writes");
+        return world_.get<Component>(entity);
+    }
+
+    template <typename T>
+    bool add(Entity entity, T value)
+    {
+        using Component = std::remove_cv_t<T>;
+        static_assert(canWrite<Component>(), "Component type not declared in writes");
+        return world_.add<Component>(entity, std::move(value));
+    }
+
+    template <typename T>
+    bool remove(Entity entity)
+    {
+        using Component = std::remove_cv_t<T>;
+        static_assert(canWrite<Component>(), "Component type not declared in writes");
+        return world_.remove<Component>(entity);
+    }
+
+    template <typename... Components>
+    [[nodiscard]] auto view()
+    {
+        static_assert((canUseViewComponent<Components>() && ...), "View component not declared in reads/writes");
+        return world_.view<Components...>();
+    }
+
+    template <typename... Components, typename Fn>
+    void each(Fn&& fn)
+    {
+        static_assert((canUseViewComponent<Components>() && ...), "Each component not declared in reads/writes");
+        world_.each<Components...>(std::forward<Fn>(fn));
+    }
+
+private:
+    template <typename T>
+    static consteval bool canWrite()
+    {
+        return TypeListContains<T, TypeList<Writes...>>::value;
+    }
+
+    template <typename T>
+    static consteval bool canRead()
+    {
+        return TypeListContains<T, TypeList<Reads...>>::value || canWrite<T>();
+    }
+
+    template <typename Component>
+    static consteval bool canUseViewComponent()
+    {
+        using Base = std::remove_const_t<Component>;
+        if constexpr (std::is_const_v<Component>) {
+            return canRead<Base>();
+        } else {
+            return canWrite<Base>();
+        }
+    }
+
+    World& world_;
 };
 
 } // namespace ecs
