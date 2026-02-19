@@ -112,3 +112,29 @@ target_link_libraries(app
   PRIVATE
     engine
 )
+
+# -----------------------------
+# ECS benchmark executable (CPU-only)
+# -----------------------------
+add_executable(ecs_benchmark
+  bench/ecs_benchmark.cpp
+)
+
+target_include_directories(ecs_benchmark
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/engine/include
+)
+
+target_compile_features(ecs_benchmark PRIVATE cxx_std_23)
+
+if(MSVC)
+  target_compile_options(ecs_benchmark PRIVATE /W4 /permissive-)
+else()
+  target_compile_options(ecs_benchmark PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+enable_testing()
+add_test(
+  NAME ecs_benchmark_10k
+  COMMAND ecs_benchmark 10000 240 25.0
+)
