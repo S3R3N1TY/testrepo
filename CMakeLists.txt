@@ -16,9 +16,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Helpful for tooling (VS, clangd, Parasoft setups, etc.)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Default build type when using single-config generators (Ninja/Makefiles)
-if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
-  set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+# Build configuration policy:
+# - Multi-config generators (Visual Studio, Ninja Multi-Config): expose x64 Debug + x64 Release
+# - Single-config generators (Ninja/Makefiles): default to Debug when not specified
+if(CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "Supported build configurations" FORCE)
+else()
+  if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+  endif()
+  set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release")
 endif()
 
 # -----------------------------
