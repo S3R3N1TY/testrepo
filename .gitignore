@@ -1,0 +1,14 @@
+# Build output
+out/
+build/
+
+# IDE garbage
+.vs/
+.vscode/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Shader intermediates (if any)
+*.spv
