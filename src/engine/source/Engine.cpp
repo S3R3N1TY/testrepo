@@ -10,6 +10,8 @@
 #include <engine/vulkan/VkSync.h>
 #include <engine/vulkan/VkUtils.h>
 
+#include <engine/ecs/Components.h>
+
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
@@ -221,6 +223,39 @@ const char* resolveFragmentShaderPath(const Engine::RunConfig& config)
 #endif
 }
 
+
+
+[[nodiscard]] FrameGraphInput buildFrameGraphInputFromWorld(const ecs::World& world)
+{
+    FrameGraphInput input{};
+    input.runTransferStage = true;
+    input.runComputeStage = true;
+    input.views.push_back(RenderViewPacket{ .viewId = 0, .clearColor = { 0.02F, 0.02F, 0.08F, 1.0F } });
+
+    uint32_t drawCount = 0;
+    world.view<ecs::Transform, ecs::MeshRef, ecs::RenderVisibility, ecs::RenderLayer>().each(
+        [&](ecs::Entity, const ecs::Transform& transform, const ecs::MeshRef& mesh, const ecs::RenderVisibility& visibility, const ecs::RenderLayer& layer) {
+            if (!visibility.visible || layer.value != 0) {
+                return;
+            }
+            input.drawPackets.push_back(DrawPacket{
+                .viewId = mesh.viewId,
+                .materialId = mesh.materialId,
+                .vertexCount = mesh.vertexCount,
+                .firstVertex = mesh.firstVertex,
+                .angleRadians = transform.rotationEulerRadians[2]
+                });
+            drawCount += 1;
+        });
+
+    input.materialBatches.push_back(MaterialBatchPacket{
+        .materialId = 1,
+        .firstDrawPacket = 0,
+        .drawPacketCount = drawCount
+        });
+
+    return input;
+}
 void validateFrameGraphInput(const FrameGraphInput& frameGraphInput)
 {
     std::unordered_set<uint32_t> viewIds{};
@@ -641,6 +676,23 @@ private:
         std::vector<VulkanSemaphore> presentFinishedByImage =
             createPerImagePresentSemaphores(deviceContext.vkDevice(), swapchain.imageCount());
 
+        ecs::World world{};
+        world.reserveEntities(config_.initialEntityCapacity);
+        world.reserve<ecs::Transform>(config_.initialRenderableCapacity);
+        world.reserve<ecs::LinearVelocity>(config_.initialRenderableCapacity);
+        world.reserve<ecs::AngularVelocity>(config_.initialRenderableCapacity);
+        world.reserve<ecs::MeshRef>(config_.initialRenderableCapacity);
+        world.reserve<ecs::RenderVisibility>(config_.initialRenderableCapacity);
+        world.reserve<ecs::RenderLayer>(config_.initialRenderableCapacity);
+        world.reserve<ecs::Lifetime>(config_.initialRenderableCapacity);
+
+        ecs::SystemScheduler scheduler{};
+        if (config_.maxSimulationWorkers != 0u) {
+            scheduler.setMaxWorkerThreads(config_.maxSimulationWorkers);
+        }
+        game.configureWorld(world);
+        game.registerSystems(scheduler);
+
         uint32_t frameIndex = 0;
         auto previousTick = std::chrono::steady_clock::now();
 
@@ -651,12 +703,23 @@ private:
             const float deltaSeconds = std::chrono::duration<float>(now - previousTick).count();
             previousTick = now;
 
-            game.tick(SimulationFrameInput{
-                .deltaSeconds = deltaSeconds,
-                .frameIndex = frameIndex
-                });
-            const FrameGraphInput frameGraphInput = game.buildFrameGraphInput();
+            const auto simulationBegin = std::chrono::steady_clock::now();
+            scheduler.execute(world, ecs::SystemFrameContext{ .deltaSeconds = deltaSeconds, .frameIndex = frameIndex });
+            const auto simulationEnd = std::chrono::steady_clock::now();
+
+            const auto extractionBegin = std::chrono::steady_clock::now();
+            const FrameGraphInput frameGraphInput = buildFrameGraphInputFromWorld(world);
+            const auto extractionEnd = std::chrono::steady_clock::now();
             validateFrameGraphInput(frameGraphInput);
+
+            if ((frameIndex % 120u) == 0u) {
+                const double simMs = std::chrono::duration<double, std::milli>(simulationEnd - simulationBegin).count();
+                const double extractMs = std::chrono::duration<double, std::milli>(extractionEnd - extractionBegin).count();
+                std::cout << "ECS metrics: alive=" << world.aliveCount()
+                          << " draws=" << frameGraphInput.drawPackets.size()
+                          << " simMs=" << simMs
+                          << " extractMs=" << extractMs << std::endl;
+            }
 
             const uint32_t frameSlot = frameIndex % kFramesInFlight;
             FrameData& frame = frames[frameSlot];
@@ -972,6 +1035,11 @@ private:
 };
 
 } // namespace
+
+void Engine::run(IGameSimulation& game)
+{
+    run(game, RunConfig{});
+}
 
 void Engine::run(IGameSimulation& game, const RunConfig& config)
 {

@@ -4,6 +4,9 @@
 #include <cstdint>
 #include <vector>
 
+#include <engine/ecs/SystemScheduler.h>
+#include <engine/ecs/World.h>
+
 struct SimulationFrameInput {
     float deltaSeconds{ 0.0F };
     uint64_t frameIndex{ 0 };
@@ -39,8 +42,8 @@ struct FrameGraphInput {
 class IGameSimulation {
 public:
     virtual ~IGameSimulation() = default;
-    virtual void tick(const SimulationFrameInput& input) = 0;
-    [[nodiscard]] virtual FrameGraphInput buildFrameGraphInput() const = 0;
+    virtual void configureWorld(ecs::World& world) = 0;
+    virtual void registerSystems(ecs::SystemScheduler& scheduler) = 0;
 };
 
 class Engine
@@ -53,7 +56,11 @@ public:
         bool enableValidation{ true };
         const char* vertexShaderPath{ nullptr };
         const char* fragmentShaderPath{ nullptr };
+        uint32_t initialEntityCapacity{ 10000 };
+        uint32_t initialRenderableCapacity{ 10000 };
+        uint32_t maxSimulationWorkers{ 0 };
     };
 
-    void run(IGameSimulation& game, const RunConfig& config = RunConfig{});
+    void run(IGameSimulation& game);
+    void run(IGameSimulation& game, const RunConfig& config);
 };
