@@ -1,6 +1,6 @@
 #pragma once
 
-#include <engine/ecs/Entity.h>
+#include <ecs/Entity.h>
 
 #include <tuple>
 #include <type_traits>

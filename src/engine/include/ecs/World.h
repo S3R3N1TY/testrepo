@@ -1,7 +1,7 @@
 #pragma once
 
-#include <engine/ecs/ComponentStorage.h>
-#include <engine/ecs/Entity.h>
+#include <ecs/ComponentStorage.h>
+#include <ecs/Entity.h>
 
 #include <cstdint>
 #include <memory>
@@ -113,7 +113,7 @@ private:
     std::unordered_map<std::type_index, std::unique_ptr<IComponentStorage>> storages_{};
 };
 
-#include <engine/ecs/Query.h>
+#include <ecs/Query.h>
 
 template <typename... Ts>
 [[nodiscard]] Query<Ts...> World::query()

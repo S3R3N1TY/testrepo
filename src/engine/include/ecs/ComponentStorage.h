@@ -1,6 +1,6 @@
 #pragma once
 
-#include <engine/ecs/Entity.h>
+#include <ecs/Entity.h>
 
 #include <memory>
 #include <unordered_map>

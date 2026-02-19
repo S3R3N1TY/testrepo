@@ -1,7 +1,7 @@
 #pragma once
 
-#include <engine/Engine.h>
-#include <engine/ecs/World.h>
+#include <Engine.h>
+#include <ecs/World.h>
 
 #include "ecs/systems/RenderExtractSys.h"
 #include "ecs/systems/SpinningSys.h"

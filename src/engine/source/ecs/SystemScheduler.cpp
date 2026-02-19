@@ -1,4 +1,4 @@
-#include <engine/ecs/SystemScheduler.h>
+#include <ecs/SystemScheduler.h>
 
 void SystemScheduler::add(Phase phase, UpdateFn fn)
 {
