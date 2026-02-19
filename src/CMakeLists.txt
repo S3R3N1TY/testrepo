@@ -1,5 +1,7 @@
+# src/CMakeLists.txt
+
 # -----------------------------
-# Engine library (YOUR code)
+# Engine library
 # -----------------------------
 add_library(engine STATIC
   engine/source/Engine.cpp
@@ -30,11 +32,8 @@ target_include_directories(engine
     ${CMAKE_CURRENT_SOURCE_DIR}/engine/include/vulkan
 )
 
-# Require C++23 at target level too (good practice for portability)
 target_compile_features(engine PUBLIC cxx_std_23)
 
-# Vulkan 1.3 intent (compile-time); actual SDK version is handled in top-level CMake.
-# This is a common pattern used by Vulkan samples/libraries.
 target_compile_definitions(engine
   PUBLIC
     VK_ENABLE_BETA_EXTENSIONS=0
@@ -46,19 +45,6 @@ target_link_libraries(engine
   PRIVATE Vulkan::Vulkan glfw
 )
 
-# Treat dependency includes as SYSTEM to reduce warning/analyzer noise
-# (doesn't stop Parasoft by itself, but helps keep the signal clean)
-get_target_property(GLFW_INCLUDES glfw INTERFACE_INCLUDE_DIRECTORIES)
-if(GLFW_INCLUDES)
-  target_include_directories(engine SYSTEM PRIVATE ${GLFW_INCLUDES})
-endif()
-
-get_target_property(GLM_INCLUDES glm::glm INTERFACE_INCLUDE_DIRECTORIES)
-if(GLM_INCLUDES)
-  target_include_directories(engine SYSTEM PUBLIC ${GLM_INCLUDES})
-endif()
-
-# Optional: reasonable warnings for YOUR target only
 if(MSVC)
   target_compile_options(engine PRIVATE /W4 /permissive-)
 else()
@@ -75,12 +61,21 @@ add_executable(app
   app/ecs/systems/RenderExtractSys.cpp
 )
 
-set(APP_SHADER_SRC_DIR ${CMAKE_SOURCE_DIR}/shaders)
-set(APP_SHADER_BIN_DIR ${CMAKE_CURRENT_BINARY_DIR}/app/shaders)
+target_compile_features(app PRIVATE cxx_std_23)
+target_link_libraries(app PRIVATE engine)
 
-find_program(GLSLANG_VALIDATOR glslangValidator HINTS ENV VULKAN_SDK PATH_SUFFIXES Bin bin)
+# -----------------------------
+# Shaders (compile to SPIR-V)
+# -----------------------------
+set(APP_SHADER_SRC_DIR ${CMAKE_SOURCE_DIR}/shaders)
+set(APP_SHADER_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated_shaders/app)
+
+find_program(GLSLANG_VALIDATOR
+  NAMES glslangValidator glslangValidator.exe
+  HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin"
+)
 if(NOT GLSLANG_VALIDATOR)
-  message(FATAL_ERROR "glslangValidator was not found. Install Vulkan SDK and ensure glslangValidator is on PATH.")
+  message(FATAL_ERROR "glslangValidator was not found. Install Vulkan SDK and ensure it is on PATH.")
 endif()
 
 set(APP_SHADER_SOURCES
@@ -89,15 +84,15 @@ set(APP_SHADER_SOURCES
 )
 
 set(APP_SHADER_BINARIES
-  ${APP_SHADER_BIN_DIR}/triangle.vert.spv
-  ${APP_SHADER_BIN_DIR}/triangle.frag.spv
+  ${APP_SHADER_GEN_DIR}/triangle.vert.spv
+  ${APP_SHADER_GEN_DIR}/triangle.frag.spv
 )
 
 add_custom_command(
   OUTPUT ${APP_SHADER_BINARIES}
-  COMMAND ${CMAKE_COMMAND} -E make_directory ${APP_SHADER_BIN_DIR}
-  COMMAND ${GLSLANG_VALIDATOR} -V ${APP_SHADER_SRC_DIR}/triangle.vert -o ${APP_SHADER_BIN_DIR}/triangle.vert.spv
-  COMMAND ${GLSLANG_VALIDATOR} -V ${APP_SHADER_SRC_DIR}/triangle.frag -o ${APP_SHADER_BIN_DIR}/triangle.frag.spv
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${APP_SHADER_GEN_DIR}
+  COMMAND ${GLSLANG_VALIDATOR} -V ${APP_SHADER_SRC_DIR}/triangle.vert -o ${APP_SHADER_GEN_DIR}/triangle.vert.spv
+  COMMAND ${GLSLANG_VALIDATOR} -V ${APP_SHADER_SRC_DIR}/triangle.frag -o ${APP_SHADER_GEN_DIR}/triangle.frag.spv
   DEPENDS ${APP_SHADER_SOURCES}
   COMMENT "Compiling GLSL shaders to SPIR-V"
   VERBATIM
@@ -106,15 +101,16 @@ add_custom_command(
 add_custom_target(app_shaders DEPENDS ${APP_SHADER_BINARIES})
 add_dependencies(app app_shaders)
 
-target_compile_definitions(engine
-  PRIVATE
-    APP_VERT_SHADER_PATH="${APP_SHADER_BIN_DIR}/triangle.vert.spv"
-    APP_FRAG_SHADER_PATH="${APP_SHADER_BIN_DIR}/triangle.frag.spv"
+# Copy SPIR-V next to the exe: app.exe/shaders/*
+add_custom_command(TARGET app POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:app>/shaders"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${APP_SHADER_GEN_DIR}"
+          "$<TARGET_FILE_DIR:app>/shaders"
 )
 
-target_compile_features(app PRIVATE cxx_std_23)
-
-target_link_libraries(app
-  PRIVATE
-    engine
+# Give the app stable runtime-relative shader paths
+target_compile_definitions(app PRIVATE
+  APP_VERT_SHADER_PATH="shaders/triangle.vert.spv"
+  APP_FRAG_SHADER_PATH="shaders/triangle.frag.spv"
 )
