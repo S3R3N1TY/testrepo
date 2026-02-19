@@ -18,6 +18,9 @@ add_library(engine STATIC
   engine/source/vulkan/SubmissionScheduler.cpp
   engine/source/vulkan/RenderGraph.cpp
   engine/source/vulkan/DeviceContext.cpp
+  engine/source/ecs/Entity.cpp
+  engine/source/ecs/SystemScheduler.cpp
+  engine/source/ecs/World.cpp
 )
 
 target_include_directories(engine
@@ -67,6 +70,9 @@ endif()
 # -----------------------------
 add_executable(app
   app/main.cpp
+  app/Simulation.cpp
+  app/ecs/systems/SpinningSys.cpp
+  app/ecs/systems/RenderExtractSys.cpp
 )
 
 set(APP_SHADER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/app/shaders)
