@@ -27,7 +27,7 @@ target_include_directories(engine
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/engine/include
   PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/engine/include/engine/vulkan
+    ${CMAKE_CURRENT_SOURCE_DIR}/engine/include/vulkan
 )
 
 # Require C++23 at target level too (good practice for portability)

@@ -1,14 +1,14 @@
-#include <engine/Engine.h>
+#include <Engine.h>
 
-#include <engine/vulkan/DeviceContext.h>
-#include <engine/vulkan/RenderGraph.h>
-#include <engine/vulkan/SubmissionScheduler.h>
-#include <engine/vulkan/SwapchainResources.h>
-#include <engine/vulkan/VkCommands.h>
-#include <engine/vulkan/VkPipeline.h>
-#include <engine/vulkan/VkShaderModule.h>
-#include <engine/vulkan/VkSync.h>
-#include <engine/vulkan/VkUtils.h>
+#include <vulkan/DeviceContext.h>
+#include <vulkan/RenderGraph.h>
+#include <vulkan/SubmissionScheduler.h>
+#include <vulkan/SwapchainResources.h>
+#include <vulkan/VkCommands.h>
+#include <vulkan/VkPipeline.h>
+#include <vulkan/VkShaderModule.h>
+#include <vulkan/VkSync.h>
+#include <vulkan/VkUtils.h>
 
 #include <GLFW/glfw3.h>
 
