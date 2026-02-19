@@ -4,8 +4,11 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <memory>
+#include <iostream>
+#include <exception>
 #include <string_view>
 #include <optional>
 #include <tuple>
@@ -25,12 +28,25 @@ struct Entity {
     [[nodiscard]] bool operator==(const Entity&) const = default;
 };
 
+class WorldCommandBuffer;
+
 class World {
 public:
     struct SystemAccessDeclaration {
         std::string_view systemName{};
         const std::vector<std::type_index>* reads{ nullptr };
         const std::vector<std::type_index>* writes{ nullptr };
+    };
+
+    struct DeferredReplayMetrics {
+        uint32_t queuedAdds{ 0 };
+        uint32_t queuedRemoves{ 0 };
+        uint32_t queuedDestroys{ 0 };
+        uint32_t queuedCreates{ 0 };
+        uint32_t appliedAdds{ 0 };
+        uint32_t appliedRemoves{ 0 };
+        uint32_t appliedDestroys{ 0 };
+        uint32_t noopCommands{ 0 };
     };
 
     class ComponentStoreBase {
@@ -221,6 +237,54 @@ public:
 
     bool destroy(Entity entity)
     {
+        assertStructuralMutationAllowed("destroy");
+        return destroyImmediateNoAccessCheck(entity);
+    }
+
+    void beginFrame() {}
+
+    void endFrame()
+    {
+#ifndef NDEBUG
+        if (lastDeferredReplayMetrics_.queuedAdds == 0 && lastDeferredReplayMetrics_.queuedRemoves == 0
+            && lastDeferredReplayMetrics_.queuedDestroys == 0 && lastDeferredReplayMetrics_.queuedCreates == 0) {
+            return;
+        }
+        std::cout << "ECS deferred replay: queued(add=" << lastDeferredReplayMetrics_.queuedAdds
+                  << ", remove=" << lastDeferredReplayMetrics_.queuedRemoves
+                  << ", destroy=" << lastDeferredReplayMetrics_.queuedDestroys
+                  << ", create=" << lastDeferredReplayMetrics_.queuedCreates
+                  << ") applied(add=" << lastDeferredReplayMetrics_.appliedAdds
+                  << ", remove=" << lastDeferredReplayMetrics_.appliedRemoves
+                  << ", destroy=" << lastDeferredReplayMetrics_.appliedDestroys
+                  << ") noops=" << lastDeferredReplayMetrics_.noopCommands << std::endl;
+#endif
+    }
+
+    void applyDeferredCommands(WorldCommandBuffer& merged);
+
+    template <typename T>
+    bool addImmediateNoAccessCheck(Entity entity, T&& value)
+    {
+        using Component = std::remove_cv_t<T>;
+        if (!isAlive(entity)) {
+            return false;
+        }
+        return componentStore<Component>().add(entity, std::forward<T>(value));
+    }
+
+    template <typename T>
+    bool removeImmediateNoAccessCheck(Entity entity)
+    {
+        using Component = std::remove_cv_t<T>;
+        if (!isAlive(entity)) {
+            return false;
+        }
+        return componentStore<Component>().remove(entity);
+    }
+
+    bool destroyImmediateNoAccessCheck(Entity entity)
+    {
         if (!isAlive(entity)) {
             return false;
         }
@@ -246,10 +310,11 @@ public:
     {
         using Component = std::remove_cv_t<T>;
         assertWriteAccess<Component>();
+        assertStructuralMutationAllowed("add");
         if (!isAlive(entity)) {
             return false;
         }
-        return componentStore<Component>().add(entity, std::move(value));
+        return addImmediateNoAccessCheck<Component>(entity, std::move(value));
     }
 
     template <typename T>
@@ -257,10 +322,11 @@ public:
     {
         using Component = std::remove_cv_t<T>;
         assertWriteAccess<Component>();
+        assertStructuralMutationAllowed("remove");
         if (!isAlive(entity)) {
             return false;
         }
-        return componentStore<Component>().remove(entity);
+        return removeImmediateNoAccessCheck<Component>(entity);
     }
 
     template <typename T>
@@ -300,7 +366,6 @@ public:
 
     void installSystemAccessContext(const SystemAccessDeclaration& declaration)
     {
-#ifndef NDEBUG
         SystemAccessContext context{};
         context.systemName = declaration.systemName;
         if (declaration.reads != nullptr) {
@@ -310,16 +375,11 @@ public:
             context.writes.insert(declaration.writes->begin(), declaration.writes->end());
         }
         currentSystemAccessContext() = std::move(context);
-#else
-        (void)declaration;
-#endif
     }
 
     void clearSystemAccessContext()
     {
-#ifndef NDEBUG
         currentSystemAccessContext().reset();
-#endif
     }
 
     template <typename T>
@@ -358,6 +418,16 @@ private:
         std::unordered_set<std::type_index> reads{};
         std::unordered_set<std::type_index> writes{};
     };
+
+    static void assertStructuralMutationAllowed([[maybe_unused]] const char* operation)
+    {
+        const auto& context = currentSystemAccessContext();
+        if (!context.has_value()) {
+            return;
+        }
+        assert(false && "Structural world mutation during system execution is forbidden; queue through WorldCommandBuffer");
+        std::terminate();
+    }
 
     static std::optional<SystemAccessContext>& currentSystemAccessContext()
     {
@@ -536,7 +606,131 @@ private:
     std::vector<bool> alive_{};
     std::vector<uint32_t> freeList_{};
     std::unordered_map<std::type_index, std::unique_ptr<ComponentStoreBase>> componentStores_{};
+    DeferredReplayMetrics lastDeferredReplayMetrics_{};
+
+    friend class WorldCommandBuffer;
 };
+
+class WorldCommandBuffer {
+public:
+    enum class Op : uint8_t { Create, Destroy, Add, Remove };
+
+    struct ICommand {
+        virtual ~ICommand() = default;
+        [[nodiscard]] virtual Op op() const = 0;
+        [[nodiscard]] virtual bool apply(World& world) = 0;
+    };
+
+    template <typename T>
+    struct AddCommand final : public ICommand {
+        Entity entity{};
+        T value{};
+
+        [[nodiscard]] Op op() const override { return Op::Add; }
+
+        [[nodiscard]] bool apply(World& world) override
+        {
+            return world.addImmediateNoAccessCheck<T>(entity, std::move(value));
+        }
+    };
+
+    template <typename T>
+    struct RemoveCommand final : public ICommand {
+        Entity entity{};
+
+        [[nodiscard]] Op op() const override { return Op::Remove; }
+
+        [[nodiscard]] bool apply(World& world) override
+        {
+            return world.removeImmediateNoAccessCheck<T>(entity);
+        }
+    };
+
+    struct DestroyCommand final : public ICommand {
+        Entity entity{};
+
+        [[nodiscard]] Op op() const override { return Op::Destroy; }
+
+        [[nodiscard]] bool apply(World& world) override
+        {
+            return world.destroyImmediateNoAccessCheck(entity);
+        }
+    };
+
+    template <typename T>
+    void queueAdd(Entity entity, T value)
+    {
+        auto command = std::make_unique<AddCommand<std::remove_cv_t<T>>>();
+        command->entity = entity;
+        command->value = std::move(value);
+        commands_.push_back(std::move(command));
+    }
+
+    template <typename T>
+    void queueRemove(Entity entity)
+    {
+        auto command = std::make_unique<RemoveCommand<std::remove_cv_t<T>>>();
+        command->entity = entity;
+        commands_.push_back(std::move(command));
+    }
+
+    void queueDestroy(Entity entity)
+    {
+        auto command = std::make_unique<DestroyCommand>();
+        command->entity = entity;
+        commands_.push_back(std::move(command));
+    }
+
+    void queueCreate() = delete;
+
+    void appendFrom(WorldCommandBuffer& other)
+    {
+        commands_.insert(commands_.end(),
+            std::make_move_iterator(other.commands_.begin()),
+            std::make_move_iterator(other.commands_.end()));
+        other.commands_.clear();
+    }
+
+    [[nodiscard]] World::DeferredReplayMetrics apply(World& world)
+    {
+        World::DeferredReplayMetrics metrics{};
+        for (auto& command : commands_) {
+            switch (command->op()) {
+            case Op::Add: metrics.queuedAdds += 1; break;
+            case Op::Remove: metrics.queuedRemoves += 1; break;
+            case Op::Destroy: metrics.queuedDestroys += 1; break;
+            case Op::Create: metrics.queuedCreates += 1; break;
+            }
+
+            const bool applied = command->apply(world);
+            if (!applied) {
+                metrics.noopCommands += 1;
+                continue;
+            }
+
+            switch (command->op()) {
+            case Op::Add: metrics.appliedAdds += 1; break;
+            case Op::Remove: metrics.appliedRemoves += 1; break;
+            case Op::Destroy: metrics.appliedDestroys += 1; break;
+            case Op::Create: break;
+            }
+        }
+        return metrics;
+    }
+
+    void clear() { commands_.clear(); }
+
+private:
+    std::vector<std::unique_ptr<ICommand>> commands_{};
+};
+
+inline void World::applyDeferredCommands(WorldCommandBuffer& merged)
+{
+    // Structural command replay is intentionally centralized here so extraction
+    // always sees a post-barrier, structurally consistent world snapshot.
+    lastDeferredReplayMetrics_ = merged.apply(*this);
+    merged.clear();
+}
 
 
 
@@ -555,8 +749,10 @@ class RestrictedWorld;
 template <typename... Reads, typename... Writes>
 class RestrictedWorld<TypeList<Reads...>, TypeList<Writes...>> {
 public:
-    explicit RestrictedWorld(World& world)
+    RestrictedWorld(World& world, WorldCommandBuffer& commandBuffer, bool declaredStructuralWriter)
         : world_(world)
+        , commandBuffer_(commandBuffer)
+        , declaredStructuralWriter_(declaredStructuralWriter)
     {
     }
 
@@ -586,20 +782,30 @@ public:
         return world_.get<Component>(entity);
     }
 
+    [[nodiscard]] WorldCommandBuffer& commands() { return commandBuffer_; }
+
     template <typename T>
-    bool add(Entity entity, T value)
+    void queueAdd(Entity entity, T value)
     {
         using Component = std::remove_cv_t<T>;
         static_assert(canWrite<Component>(), "Component type not declared in writes");
-        return world_.add<Component>(entity, std::move(value));
+        assertStructuralWriteDeclaration();
+        commandBuffer_.queueAdd<Component>(entity, std::move(value));
     }
 
     template <typename T>
-    bool remove(Entity entity)
+    void queueRemove(Entity entity)
     {
         using Component = std::remove_cv_t<T>;
         static_assert(canWrite<Component>(), "Component type not declared in writes");
-        return world_.remove<Component>(entity);
+        assertStructuralWriteDeclaration();
+        commandBuffer_.queueRemove<Component>(entity);
+    }
+
+    void queueDestroy(Entity entity)
+    {
+        assertStructuralWriteDeclaration();
+        commandBuffer_.queueDestroy(entity);
     }
 
     template <typename... Components>
@@ -617,6 +823,14 @@ public:
     }
 
 private:
+    void assertStructuralWriteDeclaration() const
+    {
+        assert(declaredStructuralWriter_ && "System must be registered as structural writer to queue structural commands");
+        if (!declaredStructuralWriter_) {
+            std::terminate();
+        }
+    }
+
     template <typename T>
     static consteval bool canWrite()
     {
@@ -641,6 +855,8 @@ private:
     }
 
     World& world_;
+    WorldCommandBuffer& commandBuffer_;
+    bool declaredStructuralWriter_{ false };
 };
 
 } // namespace ecs

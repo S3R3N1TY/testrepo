@@ -704,6 +704,7 @@ private:
             previousTick = now;
 
             const auto simulationBegin = std::chrono::steady_clock::now();
+            world.beginFrame();
             scheduler.execute(world, ecs::SystemFrameContext{ .deltaSeconds = deltaSeconds, .frameIndex = frameIndex });
             const auto simulationEnd = std::chrono::steady_clock::now();
 
@@ -711,6 +712,7 @@ private:
             const FrameGraphInput frameGraphInput = buildFrameGraphInputFromWorld(world);
             const auto extractionEnd = std::chrono::steady_clock::now();
             validateFrameGraphInput(frameGraphInput);
+            world.endFrame();
 
             if ((frameIndex % 120u) == 0u) {
                 const double simMs = std::chrono::duration<double, std::milli>(simulationEnd - simulationBegin).count();
