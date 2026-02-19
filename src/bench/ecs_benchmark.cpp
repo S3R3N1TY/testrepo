@@ -63,14 +63,14 @@ int main(int argc, char** argv)
     ecs::SystemScheduler scheduler{};
     scheduler.setMaxWorkerThreads(std::max<uint32_t>(1u, std::thread::hardware_concurrency()));
 
-    scheduler.addSystem<ecs::TypeList<ecs::LinearVelocity>, ecs::TypeList<ecs::Transform>>("bench.translate", ecs::SystemPhase::Simulation, [](auto& w, const ecs::SystemFrameContext& ctx) {
+    scheduler.addSystem<ecs::TypeList<ecs::LinearVelocity>, ecs::TypeList<ecs::Transform>>("bench.translate", ecs::SystemPhase::Simulation, ecs::StructuralWrites::No, [](auto& w, const ecs::SystemFrameContext& ctx) {
         w.template view<ecs::Transform, const ecs::LinearVelocity>().each([&](ecs::Entity, ecs::Transform& t, const ecs::LinearVelocity& v) {
             t.position[0] += v.unitsPerSecond[0] * ctx.deltaSeconds;
             t.position[1] += v.unitsPerSecond[1] * ctx.deltaSeconds;
         });
     });
 
-    scheduler.addSystem<ecs::TypeList<ecs::AngularVelocity>, ecs::TypeList<ecs::Transform>>("bench.rotate", ecs::SystemPhase::Simulation, [](auto& w, const ecs::SystemFrameContext& ctx) {
+    scheduler.addSystem<ecs::TypeList<ecs::AngularVelocity>, ecs::TypeList<ecs::Transform>>("bench.rotate", ecs::SystemPhase::Simulation, ecs::StructuralWrites::No, [](auto& w, const ecs::SystemFrameContext& ctx) {
         w.template view<ecs::Transform, const ecs::AngularVelocity>().each([&](ecs::Entity, ecs::Transform& t, const ecs::AngularVelocity& v) {
             t.rotationEulerRadians[2] += v.radiansPerSecond[2] * ctx.deltaSeconds;
         });
