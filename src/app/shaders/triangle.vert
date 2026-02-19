@@ -2,8 +2,12 @@
 
 layout(location = 0) out vec3 vColor;
 
+layout(set = 0, binding = 0, std430) readonly buffer TransformBuffer {
+    mat4 transforms[];
+} transformBuffer;
+
 layout(push_constant) uniform PushConstants {
-    float angle;
+    uint transformIndex;
 } pc;
 
 vec2 positions[3] = vec2[](
@@ -20,10 +24,7 @@ vec3 colors[3] = vec3[](
 
 void main()
 {
-    vec2 p = positions[gl_VertexIndex];
-    float c = cos(pc.angle);
-    float s = sin(pc.angle);
-    vec2 rotated = vec2(c * p.x - s * p.y, s * p.x + c * p.y);
-    gl_Position = vec4(rotated, 0.0, 1.0);
+    vec4 localPos = vec4(positions[gl_VertexIndex], 0.0, 1.0);
+    gl_Position = transformBuffer.transforms[pc.transformIndex] * localPos;
     vColor = colors[gl_VertexIndex];
 }

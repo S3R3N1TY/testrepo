@@ -5,12 +5,14 @@
 #include <engine/vulkan/SubmissionScheduler.h>
 #include <engine/vulkan/SwapchainResources.h>
 #include <engine/vulkan/VkCommands.h>
+#include <engine/vulkan/VkBuffer.h>
 #include <engine/vulkan/VkPipeline.h>
 #include <engine/vulkan/VkShaderModule.h>
 #include <engine/vulkan/VkSync.h>
 #include <engine/vulkan/VkUtils.h>
 
 #include <engine/ecs/Components.h>
+#include <engine/ecs/TransformPipeline.h>
 
 #include <GLFW/glfw3.h>
 
@@ -19,6 +21,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <iostream>
 #include <mutex>
@@ -27,6 +30,7 @@
 #include <string>
 #include <thread>
 #include <unordered_set>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -35,6 +39,9 @@ constexpr uint32_t kFramesInFlight = 2;
 struct FrameData {
     VulkanSemaphore imageAvailable{};
     VulkanFence inFlight{};
+    VulkanBuffer transformBuffer{};
+    VkDescriptorSet transformDescriptorSet{ VK_NULL_HANDLE };
+    uint32_t transformCapacity{ 0 };
 };
 
 
@@ -233,17 +240,19 @@ const char* resolveFragmentShaderPath(const Engine::RunConfig& config)
     input.views.push_back(RenderViewPacket{ .viewId = 0, .clearColor = { 0.02F, 0.02F, 0.08F, 1.0F } });
 
     uint32_t drawCount = 0;
-    world.view<ecs::Transform, ecs::MeshRef, ecs::RenderVisibility, ecs::RenderLayer>().each(
-        [&](ecs::Entity, const ecs::Transform& transform, const ecs::MeshRef& mesh, const ecs::RenderVisibility& visibility, const ecs::RenderLayer& layer) {
+    world.view<ecs::LocalToWorld, ecs::MeshRef, ecs::RenderVisibility, ecs::RenderLayer>().each(
+        [&](ecs::Entity, const ecs::LocalToWorld& localToWorld, const ecs::MeshRef& mesh, const ecs::RenderVisibility& visibility, const ecs::RenderLayer& layer) {
             if (!visibility.visible || layer.value != 0) {
                 return;
             }
+            const uint32_t transformIndex = static_cast<uint32_t>(input.transformMatrices.size());
+            input.transformMatrices.push_back(localToWorld.matrix);
             input.drawPackets.push_back(DrawPacket{
                 .viewId = mesh.viewId,
                 .materialId = mesh.materialId,
                 .vertexCount = mesh.vertexCount,
                 .firstVertex = mesh.firstVertex,
-                .angleRadians = transform.rotationEulerRadians[2]
+                .transformIndex = transformIndex
                 });
             drawCount += 1;
         });
@@ -284,6 +293,9 @@ void validateFrameGraphInput(const FrameGraphInput& frameGraphInput)
         }
         if (!materialIds.empty() && !materialIds.contains(draw.materialId)) {
             throw std::runtime_error("DrawPacket references unknown materialId");
+        }
+        if (draw.transformIndex >= frameGraphInput.transformMatrices.size()) {
+            throw std::runtime_error("DrawPacket references unknown transform index");
         }
     }
 }
@@ -410,6 +422,7 @@ struct RenderSubsystem {
         VkCommandBuffer secondary,
         VkPipeline pipeline,
         VkPipelineLayout pipelineLayout,
+        VkDescriptorSet transformDescriptorSet,
         VkExtent2D extent,
         const std::vector<DrawPacket>& drawPackets,
         size_t beginIndex,
@@ -427,9 +440,10 @@ struct RenderSubsystem {
         vkCmdSetScissor(secondary, 0, 1, &scissor);
 
         vkCmdBindPipeline(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        vkCmdBindDescriptorSets(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &transformDescriptorSet, 0, nullptr);
         for (size_t i = beginIndex; i < endIndex; ++i) {
             const DrawPacket& draw = drawPackets[i];
-            vkCmdPushConstants(secondary, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float), &draw.angleRadians);
+            vkCmdPushConstants(secondary, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(draw.transformIndex), &draw.transformIndex);
             vkCmdDraw(secondary, draw.vertexCount, 1, draw.firstVertex, 0);
         }
     }
@@ -547,10 +561,44 @@ private:
             VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         swapchain.buildFramebuffers(deviceContext, renderPass.get());
 
+        VkDescriptorSetLayoutBinding transformBinding{};
+        transformBinding.binding = 0;
+        transformBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        transformBinding.descriptorCount = 1;
+        transformBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+        VkDescriptorSetLayoutCreateInfo transformSetLayoutCi{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        transformSetLayoutCi.bindingCount = 1;
+        transformSetLayoutCi.pBindings = &transformBinding;
+
+        VkDescriptorSetLayout transformSetLayout = VK_NULL_HANDLE;
+        ensure(vkutil::checkResult(vkCreateDescriptorSetLayout(deviceContext.vkDevice(), &transformSetLayoutCi, nullptr, &transformSetLayout), "vkCreateDescriptorSetLayout"), "vkCreateDescriptorSetLayout");
+
+        VkDescriptorPoolSize transformPoolSize{};
+        transformPoolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        transformPoolSize.descriptorCount = kFramesInFlight;
+
+        VkDescriptorPoolCreateInfo transformPoolCi{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        transformPoolCi.maxSets = kFramesInFlight;
+        transformPoolCi.poolSizeCount = 1;
+        transformPoolCi.pPoolSizes = &transformPoolSize;
+
+        VkDescriptorPool transformDescriptorPool = VK_NULL_HANDLE;
+        ensure(vkutil::checkResult(vkCreateDescriptorPool(deviceContext.vkDevice(), &transformPoolCi, nullptr, &transformDescriptorPool), "vkCreateDescriptorPool"), "vkCreateDescriptorPool");
+
+        std::array<VkDescriptorSetLayout, kFramesInFlight> transformLayouts{};
+        transformLayouts.fill(transformSetLayout);
+        std::array<VkDescriptorSet, kFramesInFlight> transformDescriptorSets{};
+        VkDescriptorSetAllocateInfo transformSetAlloc{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        transformSetAlloc.descriptorPool = transformDescriptorPool;
+        transformSetAlloc.descriptorSetCount = kFramesInFlight;
+        transformSetAlloc.pSetLayouts = transformLayouts.data();
+        ensure(vkutil::checkResult(vkAllocateDescriptorSets(deviceContext.vkDevice(), &transformSetAlloc, transformDescriptorSets.data()), "vkAllocateDescriptorSets"), "vkAllocateDescriptorSets");
+
         VulkanPipelineLayout pipelineLayout(
             deviceContext.vkDevice(),
-            {},
-            { VkPushConstantRange{ VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) } });
+            { transformSetLayout },
+            { VkPushConstantRange{ VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(uint32_t) } });
 
         const std::vector<char> vertShaderCode = loadShaderCode(resolveVertexShaderPath(config_));
         const std::vector<char> fragShaderCode = loadShaderCode(resolveFragmentShaderPath(config_));
@@ -676,6 +724,10 @@ private:
         std::vector<VulkanSemaphore> presentFinishedByImage =
             createPerImagePresentSemaphores(deviceContext.vkDevice(), swapchain.imageCount());
 
+        for (uint32_t i = 0; i < kFramesInFlight; ++i) {
+            frames[i].transformDescriptorSet = transformDescriptorSets[i];
+        }
+
         ecs::World world{};
         world.reserveEntities(config_.initialEntityCapacity);
         world.reserve<ecs::Transform>(config_.initialRenderableCapacity);
@@ -685,12 +737,17 @@ private:
         world.reserve<ecs::RenderVisibility>(config_.initialRenderableCapacity);
         world.reserve<ecs::RenderLayer>(config_.initialRenderableCapacity);
         world.reserve<ecs::Lifetime>(config_.initialRenderableCapacity);
+        world.reserve<ecs::LocalToWorld>(config_.initialRenderableCapacity);
+        world.reserve<ecs::TransformDirty>(config_.initialRenderableCapacity);
+        world.reserve<ecs::TransformPrevious>(config_.initialRenderableCapacity);
+        world.reserve<ecs::TransformHierarchyParent>(config_.initialRenderableCapacity);
 
         ecs::SystemScheduler scheduler{};
         if (config_.maxSimulationWorkers != 0u) {
             scheduler.setMaxWorkerThreads(config_.maxSimulationWorkers);
         }
         game.configureWorld(world);
+        ecs::transform::registerTransformSystems(scheduler);
         game.registerSystems(scheduler);
 
         uint32_t frameIndex = 0;
@@ -741,6 +798,42 @@ private:
             }
 
             ensure(frame.inFlight.resetResult(), "frameFence.reset");
+
+            const uint32_t requiredTransforms = std::max<uint32_t>(1u, static_cast<uint32_t>(frameGraphInput.transformMatrices.size()));
+            if (frame.transformCapacity < requiredTransforms || !frame.transformBuffer.valid()) {
+                frame.transformBuffer = VulkanBuffer(
+                    *deviceContext.gpuAllocator,
+                    static_cast<VkDeviceSize>(requiredTransforms) * sizeof(std::array<float, 16>),
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                    false,
+                    VulkanBuffer::AllocationPolicy::Upload);
+                frame.transformCapacity = requiredTransforms;
+
+                VkDescriptorBufferInfo bufferInfo{};
+                bufferInfo.buffer = frame.transformBuffer.get();
+                bufferInfo.offset = 0;
+                bufferInfo.range = static_cast<VkDeviceSize>(frame.transformCapacity) * sizeof(std::array<float, 16>);
+
+                VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+                write.dstSet = frame.transformDescriptorSet;
+                write.dstBinding = 0;
+                write.descriptorCount = 1;
+                write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                write.pBufferInfo = &bufferInfo;
+                vkUpdateDescriptorSets(deviceContext.vkDevice(), 1, &write, 0, nullptr);
+            }
+
+            if (!frameGraphInput.transformMatrices.empty()) {
+                void* mapped = frame.transformBuffer.map();
+                std::memcpy(
+                    mapped,
+                    frameGraphInput.transformMatrices.data(),
+                    frameGraphInput.transformMatrices.size() * sizeof(std::array<float, 16>));
+                frame.transformBuffer.flush(
+                    0,
+                    static_cast<VkDeviceSize>(frameGraphInput.transformMatrices.size()) * sizeof(std::array<float, 16>));
+            }
 
             uint32_t imageIndex = 0;
             const VkResult acquireResult = vkAcquireNextImageKHR(
@@ -954,6 +1047,7 @@ private:
                             borrowed.value().handle,
                             pipeline.get(),
                             pipelineLayout.get(),
+                            frame.transformDescriptorSet,
                             extent,
                             frameGraphInput.drawPackets,
                             begin,
@@ -1030,6 +1124,9 @@ private:
         if (!deviceContext.waitDeviceIdle()) {
             throw std::runtime_error("waitDeviceIdle failed");
         }
+
+        vkDestroyDescriptorPool(deviceContext.vkDevice(), transformDescriptorPool, nullptr);
+        vkDestroyDescriptorSetLayout(deviceContext.vkDevice(), transformSetLayout, nullptr);
     }
 
     Engine::RunConfig config_{};

@@ -11,6 +11,29 @@ struct Transform {
     std::array<float, 3> scale{ 1.0F, 1.0F, 1.0F };
 };
 
+struct LocalToWorld {
+    std::array<float, 16> matrix{
+        1.0F, 0.0F, 0.0F, 0.0F,
+        0.0F, 1.0F, 0.0F, 0.0F,
+        0.0F, 0.0F, 1.0F, 0.0F,
+        0.0F, 0.0F, 0.0F, 1.0F
+    };
+};
+
+struct TransformDirty {
+    bool value{ true };
+};
+
+struct TransformPrevious {
+    Transform value{};
+};
+
+struct TransformHierarchyParent {
+    uint32_t parentIndex{ 0 };
+    uint32_t parentGeneration{ 0 };
+    bool hasParent{ false };
+};
+
 struct LinearVelocity {
     std::array<float, 3> unitsPerSecond{ 0.0F, 0.0F, 0.0F };
 };

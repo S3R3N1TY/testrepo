@@ -1,5 +1,6 @@
 #include <engine/ecs/Components.h>
 #include <engine/ecs/SystemScheduler.h>
+#include <engine/ecs/TransformPipeline.h>
 #include <engine/ecs/World.h>
 
 #include <algorithm>
@@ -50,6 +51,10 @@ int main(int argc, char** argv)
     world.reserve<ecs::AngularVelocity>(entities);
     world.reserve<ecs::RenderVisibility>(entities);
     world.reserve<ecs::RenderLayer>(entities);
+    world.reserve<ecs::LocalToWorld>(entities);
+    world.reserve<ecs::TransformDirty>(entities);
+    world.reserve<ecs::TransformPrevious>(entities);
+    world.reserve<ecs::TransformHierarchyParent>(entities);
 
     for (uint32_t i = 0; i < entities; ++i) {
         const ecs::Entity e = world.create();
@@ -62,6 +67,7 @@ int main(int argc, char** argv)
 
     ecs::SystemScheduler scheduler{};
     scheduler.setMaxWorkerThreads(std::max<uint32_t>(1u, std::thread::hardware_concurrency()));
+    ecs::transform::registerTransformSystems(scheduler);
 
     scheduler.addSystem<ecs::TypeList<ecs::LinearVelocity>, ecs::TypeList<ecs::Transform>>("bench.translate", ecs::SystemPhase::Simulation, ecs::StructuralWrites::No, [](auto& w, const ecs::SystemFrameContext& ctx) {
         w.template view<ecs::Transform, const ecs::LinearVelocity>().each([&](ecs::Entity, ecs::Transform& t, const ecs::LinearVelocity& v) {

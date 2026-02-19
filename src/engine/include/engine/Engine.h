@@ -28,13 +28,14 @@ struct DrawPacket {
     uint32_t materialId{ 0 };
     uint32_t vertexCount{ 3 };
     uint32_t firstVertex{ 0 };
-    float angleRadians{ 0.0F };
+    uint32_t transformIndex{ 0 };
 };
 
 struct FrameGraphInput {
     std::vector<RenderViewPacket> views{};
     std::vector<MaterialBatchPacket> materialBatches{};
     std::vector<DrawPacket> drawPackets{};
+    std::vector<std::array<float, 16>> transformMatrices{};
     bool runTransferStage{ true };
     bool runComputeStage{ true };
 };
