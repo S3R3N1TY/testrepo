@@ -75,7 +75,7 @@ add_executable(app
   app/ecs/systems/RenderExtractSys.cpp
 )
 
-set(APP_SHADER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/app/shaders)
+set(APP_SHADER_SRC_DIR ${CMAKE_SOURCE_DIR}/shaders)
 set(APP_SHADER_BIN_DIR ${CMAKE_CURRENT_BINARY_DIR}/app/shaders)
 
 find_program(GLSLANG_VALIDATOR glslangValidator HINTS ENV VULKAN_SDK PATH_SUFFIXES Bin bin)
