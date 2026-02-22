@@ -26,6 +26,8 @@ struct DrawPacket {
     uint32_t vertexCount{ 3 };
     uint32_t firstVertex{ 0 };
     float angleRadians{ 0.0F };
+    std::array<float, 3> worldPosition{ 0.0F, 0.0F, 0.0F };
+    uint32_t worldEntityId{ 0 };
 };
 
 struct FrameGraphInput {

@@ -142,8 +142,15 @@ int main()
 
     // Change tracking should update when mutable query actually mutates data.
     const uint64_t posBefore = world.componentVersion(*posId);
-    world.query<PositionComp>().each([&](Entity, PositionComp& p) {
-        p.x += 1.0F;
+    world.query<PositionComp>().each([&](Entity, WriteRef<PositionComp> p) {
+        (void)p.get().x;
+    });
+    const uint64_t posUnchanged = world.componentVersion(*posId);
+    assert(posUnchanged == posBefore);
+
+    world.query<PositionComp>().each([&](Entity, WriteRef<PositionComp> p) {
+        p.touch();
+        p.get().x += 1.0F;
     });
     const uint64_t posAfter = world.componentVersion(*posId);
     assert(posAfter > posBefore);
@@ -165,6 +172,17 @@ int main()
 
     const Entity rollbackE = world.createEntity();
     world.emplaceComponent<RotationComp>(rollbackE, RotationComp{ .angleRadians = 1.0F, .angularVelocityRadiansPerSecond = 2.0F });
+    scb.setComponent<RotationComp>(rollbackE, RotationComp{ .angleRadians = 9.0F, .angularVelocityRadiansPerSecond = 9.0F });
+    scb.setFailureInjection(FailureInjectionConfig{ .failAfterNApply = 1 });
+    bool rollbackTriggered = false;
+    try {
+        world.playbackPhase(StructuralPlaybackPhase::PostSim);
+    }
+    catch (...) {
+        rollbackTriggered = true;
+    }
+    assert(rollbackTriggered);
+    scb.setFailureInjection(FailureInjectionConfig{});
     scb.setComponent<RotationComp>(rollbackE, RotationComp{ .angleRadians = 9.0F, .angularVelocityRadiansPerSecond = 9.0F });
     world.playbackPhase(StructuralPlaybackPhase::PostSim);
     const RotationComp* updated = world.getComponent<RotationComp>(rollbackE);

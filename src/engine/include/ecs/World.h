@@ -24,6 +24,7 @@
 #include <type_traits>
 #include <typeindex>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -283,6 +284,8 @@ public:
 
     void beginReadPhase() { mutationEnabled_ = false; }
     void endReadPhase() { mutationEnabled_ = true; }
+    void beginSystemWriteScope();
+    void endSystemWriteScope();
 
     [[nodiscard]] uint64_t componentVersion(uint32_t typeId) const noexcept;
 
@@ -428,7 +431,9 @@ private:
         std::vector<Entity> entities{};
         std::vector<AlignedColumn> columns{};
         std::vector<uint64_t> columnVersions{};
+        std::vector<uint64_t> chunkDirtyEpochByColumn{};
         std::vector<std::vector<uint64_t>> dirtyRowsByColumn{};
+        std::vector<std::vector<uint64_t>> rowDirtyEpochByColumn{};
         uint64_t structuralVersion{ 1 };
         size_t count{ 0 };
     };
@@ -703,10 +708,23 @@ private:
     void bumpChunkVersion(uint32_t archetypeId, uint32_t chunkIndex, ComponentTypeId typeId);
     void emplaceHotComponentCloned(Entity entity, ComponentTypeId typeId, const void* componentData);
     void markChunkComponentDirty(uint32_t archetypeId, uint32_t chunkIndex, ComponentTypeId typeId, uint32_t row);
+    void markComponentDirtyByEntity(Entity entity, ComponentTypeId typeId);
 
 public:
     [[nodiscard]] uint64_t chunkVersion(ChunkHandle handle, uint32_t componentType) const;
     [[nodiscard]] uint64_t chunkStructuralVersion(ChunkHandle handle) const;
+    [[nodiscard]] uint64_t chunkDirtyEpoch(ChunkHandle handle, uint32_t componentType) const;
+    [[nodiscard]] uint64_t frameEpoch() const noexcept { return frameEpoch_; }
+
+    template <typename T>
+    void markModified(Entity entity)
+    {
+        if constexpr (ComponentResidencyTrait<T>::value == ComponentResidency::HotArchetype) {
+            if (const auto type = findHotComponentType<T>(); type.has_value()) {
+                markComponentDirtyByEntity(entity, *type);
+            }
+        }
+    }
 
     std::vector<EntityRecord> records_{};
     std::vector<uint32_t> freeList_{};
@@ -727,6 +745,8 @@ public:
     StructuralCommandBuffer* structuralBuffer_{ nullptr };
     bool frameActive_{ false };
     bool mutationEnabled_{ true };
+    uint64_t frameEpoch_{ 1 };
+    std::unordered_set<uint64_t> pendingDirtyVersionBumps_{};
 
 
     template <typename... Ts>
