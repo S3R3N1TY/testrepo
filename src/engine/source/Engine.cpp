@@ -978,3 +978,9 @@ void Engine::run(IGameSimulation& game, const RunConfig& config)
     EngineRuntime runtime(config);
     runtime.run(game);
 }
+
+
+void Engine::run(IGameSimulation& game)
+{
+    run(game, RunConfig{});
+}
