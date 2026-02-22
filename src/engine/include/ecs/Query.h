@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstddef>
+#include <optional>
 #include <tuple>
 #include <type_traits>
 #include <vector>
@@ -15,7 +16,65 @@ template <typename T>
 using QueryStorage = typename QueryArg<std::remove_cvref_t<T>>::StorageType;
 
 template <typename T>
-using QueryPointer = std::conditional_t<QueryArg<std::remove_cvref_t<T>>::kConst, const QueryStorage<T>*, QueryStorage<T>*>;
+class WriteRef {
+public:
+    WriteRef() = default;
+    WriteRef(T* ptr, World* world, Entity entity, uint32_t typeId)
+        : ptr_(ptr), world_(world), entity_(entity), typeId_(typeId)
+    {
+    }
+
+    [[nodiscard]] T& get() { return *ptr_; }
+    [[nodiscard]] const T& get() const { return *ptr_; }
+    [[nodiscard]] T* operator->() { return ptr_; }
+    [[nodiscard]] const T* operator->() const { return ptr_; }
+    [[nodiscard]] operator T&() { return *ptr_; }
+
+    WriteRef& operator=(const T& value)
+    {
+        touch();
+        *ptr_ = value;
+        return *this;
+    }
+
+    void touch()
+    {
+        if (world_ != nullptr) {
+            world_->markModified<T>(entity_);
+        }
+    }
+
+private:
+    T* ptr_{ nullptr };
+    World* world_{ nullptr };
+    Entity entity{};
+    uint32_t typeId_{ 0 };
+};
+
+
+template <typename T>
+class OptionalWriteRef {
+public:
+    OptionalWriteRef() = default;
+    explicit OptionalWriteRef(WriteRef<T> ref)
+        : value_(std::move(ref))
+    {
+    }
+
+    [[nodiscard]] bool has_value() const { return value_.has_value(); }
+    [[nodiscard]] WriteRef<T>* get() { return value_ ? &*value_ : nullptr; }
+    [[nodiscard]] const WriteRef<T>* get() const { return value_ ? &*value_ : nullptr; }
+    [[nodiscard]] operator WriteRef<T>*() { return get(); }
+    [[nodiscard]] operator const WriteRef<T>*() const { return get(); }
+
+private:
+    std::optional<WriteRef<T>> value_{};
+};
+template <typename T>
+using QueryPointer = std::conditional_t<
+    QueryArg<std::remove_cvref_t<T>>::kOptional && !QueryArg<std::remove_cvref_t<T>>::kConst,
+    OptionalWriteRef<QueryStorage<T>>,
+    std::conditional_t<QueryArg<std::remove_cvref_t<T>>::kConst, const QueryStorage<T>*, QueryStorage<T>*>>;
 
 template <typename... Ts>
 class Query {
@@ -64,7 +123,6 @@ public:
             for (uint32_t chunkIndex = 0; chunkIndex < archetype.chunks.size(); ++chunkIndex) {
                 auto& chunk = archetype.chunks[chunkIndex];
                 for (uint32_t row = 0; row < chunk.count; ++row) {
-                    markEntityWriteAccess(world_, archetypeId, chunkIndex, row, remaps, optionalRemaps, std::index_sequence_for<Ts...>{});
                     const Entity entity = chunk.entities[row];
                     invokeEach(std::forward<Fn>(fn), entity, chunk, row, columns, sizes, present, std::index_sequence_for<Ts...>{});
                 }
@@ -92,7 +150,6 @@ public:
                 if (chunk.count == 0) {
                     continue;
                 }
-                markChunkWriteAccess(world_, archetypeId, chunkIndex, static_cast<uint32_t>(chunk.count), remaps, optionalRemaps, std::index_sequence_for<Ts...>{});
                 invokeChunkOptional(std::forward<Fn>(fn), chunk, columns, sizes, present, std::index_sequence_for<Ts...>{});
             }
         }
@@ -180,7 +237,7 @@ private:
     }
 
     template <typename T>
-    static decltype(auto) argFrom(auto& chunk, uint32_t row, size_t column, size_t size, bool present)
+    decltype(auto) argFrom(Entity entity, auto& chunk, uint32_t row, size_t column, size_t size, bool present)
     {
         using Raw = std::remove_cvref_t<T>;
         using Store = QueryStorage<Raw>;
@@ -188,15 +245,28 @@ private:
             if (!present) {
                 return static_cast<QueryPointer<Raw>>(nullptr);
             }
-            return reinterpret_cast<QueryPointer<Raw>>(World::componentPtr(chunk, column, row, size));
+            if constexpr (QueryArg<Raw>::kConst) {
+                return reinterpret_cast<const Store*>(World::componentPtr(chunk, column, row, size));
+            }
+            else {
+                auto* ptr = reinterpret_cast<Store*>(World::componentPtr(chunk, column, row, size));
+                return OptionalWriteRef<Store>{ WriteRef<Store>{ ptr, &world_, entity, world_.template componentTypeId<Store>().value_or(0) } };
+            }
         }
         else {
-            return *reinterpret_cast<std::conditional_t<QueryArg<Raw>::kConst, const Store*, Store*>>(World::componentPtr(chunk, column, row, size));
+            if constexpr (QueryArg<Raw>::kConst) {
+                return *reinterpret_cast<const Store*>(World::componentPtr(chunk, column, row, size));
+            }
+            else {
+                auto* ptr = reinterpret_cast<Store*>(World::componentPtr(chunk, column, row, size));
+                auto type = world_.template componentTypeId<Store>();
+                return WriteRef<Store>{ ptr, &world_, entity, type.value_or(0) };
+            }
         }
     }
 
     template <typename Fn, size_t... Is>
-    static void invokeEach(Fn&& fn,
+    void invokeEach(Fn&& fn,
         Entity entity,
         auto& chunk,
         uint32_t row,
@@ -205,7 +275,7 @@ private:
         const std::array<bool, sizeof...(Ts)>& present,
         std::index_sequence<Is...>)
     {
-        std::forward<Fn>(fn)(entity, argFrom<Ts>(chunk, row, columns[Is], sizes[Is], present[Is])...);
+        std::forward<Fn>(fn)(entity, argFrom<Ts>(entity, chunk, row, columns[Is], sizes[Is], present[Is])...);
     }
 
     template <typename T>
@@ -407,7 +477,7 @@ private:
     }
 
     template <typename Fn, size_t... Is>
-    static void invokeEach(Fn&& fn,
+    void invokeEach(Fn&& fn,
         Entity entity,
         const auto& chunk,
         uint32_t row,
@@ -416,7 +486,7 @@ private:
         const std::array<bool, sizeof...(Ts)>& present,
         std::index_sequence<Is...>)
     {
-        std::forward<Fn>(fn)(entity, argFrom<Ts>(chunk, row, columns[Is], sizes[Is], present[Is])...);
+        std::forward<Fn>(fn)(entity, argFrom<Ts>(entity, chunk, row, columns[Is], sizes[Is], present[Is])...);
     }
 
     template <typename T>

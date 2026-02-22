@@ -8,6 +8,13 @@ struct IncludeTerm {
     uint32_t type{ 0 };
     ComponentAccess access{ ComponentAccess::ReadOnly };
 };
+
+uint64_t dirtyKey(uint32_t archetypeId, uint32_t chunkIndex, uint32_t typeId)
+{
+    return (static_cast<uint64_t>(archetypeId) << 40u)
+        ^ (static_cast<uint64_t>(chunkIndex) << 20u)
+        ^ static_cast<uint64_t>(typeId);
+}
 }
 
 Entity World::createEntity()
@@ -334,7 +341,9 @@ World::HotInsertResult World::moveEntityToArchetype(Entity entity,
             const ComponentMeta& meta = hotComponentMeta_[id];
             newChunk.columns.push_back(AlignedColumn::create(kChunkCapacity * meta.size, meta.align));
             newChunk.columnVersions.push_back(1);
+            newChunk.chunkDirtyEpochByColumn.push_back(0);
             newChunk.dirtyRowsByColumn.push_back(std::vector<uint64_t>(dirtyWords, 0));
+            newChunk.rowDirtyEpochByColumn.push_back(std::vector<uint64_t>(kChunkCapacity, 0));
         }
         dstArch.chunks.push_back(std::move(newChunk));
     }
@@ -455,6 +464,7 @@ void World::beginFrame()
 {
     frameActive_ = true;
     mutationEnabled_ = true;
+    frameEpoch_ += 1;
     playbackPhase(StructuralPlaybackPhase::PreSim);
 }
 
@@ -467,9 +477,27 @@ void World::playbackPhase(StructuralPlaybackPhase phase)
 
 void World::endFrame()
 {
+    endSystemWriteScope();
     playbackPhase(StructuralPlaybackPhase::EndFrame);
     mutationEnabled_ = true;
     frameActive_ = false;
+}
+
+void World::beginSystemWriteScope()
+{
+    pendingDirtyVersionBumps_.clear();
+}
+
+void World::endSystemWriteScope()
+{
+    for (uint64_t key : pendingDirtyVersionBumps_) {
+        const uint32_t archetypeId = static_cast<uint32_t>((key >> 40u) & 0xFFFFFu);
+        const uint32_t chunkIndex = static_cast<uint32_t>((key >> 20u) & 0xFFFFFu);
+        const uint32_t typeId = static_cast<uint32_t>(key & 0xFFFFFu);
+        bumpVersion(typeId);
+        bumpChunkVersion(archetypeId, chunkIndex, typeId);
+    }
+    pendingDirtyVersionBumps_.clear();
 }
 
 void World::setStructuralCommandBuffer(StructuralCommandBuffer* commandBuffer)
@@ -556,8 +584,26 @@ void World::markChunkComponentDirty(uint32_t archetypeId, uint32_t chunkIndex, C
     if (word < chunk.dirtyRowsByColumn[colIt->second].size()) {
         chunk.dirtyRowsByColumn[colIt->second][word] |= bit;
     }
-    bumpVersion(typeId);
-    bumpChunkVersion(archetypeId, chunkIndex, typeId);
+    if (row < chunk.rowDirtyEpochByColumn[colIt->second].size()) {
+        chunk.rowDirtyEpochByColumn[colIt->second][row] = frameEpoch_;
+    }
+
+    if (chunk.chunkDirtyEpochByColumn[colIt->second] != frameEpoch_) {
+        chunk.chunkDirtyEpochByColumn[colIt->second] = frameEpoch_;
+        pendingDirtyVersionBumps_.insert(dirtyKey(archetypeId, chunkIndex, typeId));
+    }
+}
+
+void World::markComponentDirtyByEntity(Entity entity, ComponentTypeId typeId)
+{
+    if (!isAlive(entity)) {
+        return;
+    }
+    const EntityRecord& rec = records_[entity.id];
+    if (rec.archetypeId == kInvalidArchetype) {
+        return;
+    }
+    markChunkComponentDirty(rec.archetypeId, rec.chunkIndex, typeId, rec.row);
 }
 
 uint64_t World::chunkVersion(ChunkHandle handle, uint32_t componentType) const
@@ -586,4 +632,20 @@ uint64_t World::chunkStructuralVersion(ChunkHandle handle) const
         return 0;
     }
     return arch.chunks[handle.chunkIndex].structuralVersion;
+}
+
+uint64_t World::chunkDirtyEpoch(ChunkHandle handle, uint32_t componentType) const
+{
+    if (handle.archetypeId >= archetypes_.size()) {
+        return 0;
+    }
+    const Archetype& arch = archetypes_[handle.archetypeId];
+    if (handle.chunkIndex >= arch.chunks.size()) {
+        return 0;
+    }
+    const auto colIt = arch.columnByType.find(componentType);
+    if (colIt == arch.columnByType.end()) {
+        return 0;
+    }
+    return arch.chunks[handle.chunkIndex].chunkDirtyEpochByColumn[colIt->second];
 }

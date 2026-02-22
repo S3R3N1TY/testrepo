@@ -58,7 +58,7 @@ public:
     template <typename... Ts>
     [[nodiscard]] auto query()
     {
-        validateRead<Ts...>();
+        validateQuery<Ts...>();
         return world_.template query<Ts...>();
     }
 
@@ -75,6 +75,15 @@ public:
         validateWrite<T>();
         world_.template removeComponent<T>(entity);
     }
+
+    template <typename T>
+    void markModified(Entity entity)
+    {
+        validateWrite<T>();
+        world_.template markModified<T>(entity);
+    }
+
+    [[nodiscard]] World& world() { return world_; }
 
 private:
     template <typename T>
@@ -117,6 +126,39 @@ private:
 
     template <typename... Ts>
     void validateRead() const { (validateOneRead<Ts>(), ...); }
+
+    template <typename T>
+    void validateOneQueryAccess() const
+    {
+        using Raw = std::remove_cvref_t<T>;
+        using Decayed = std::remove_cvref_t<typename QueryArg<Raw>::StorageType>;
+        if constexpr (ComponentResidencyTrait<Decayed>::value == ComponentResidency::ColdSparse) {
+            return;
+        }
+        if (access_ == nullptr) {
+            return;
+        }
+        const auto id = world_.template componentTypeId<Decayed>();
+        if (!id.has_value()) {
+            return;
+        }
+        if constexpr (QueryArg<Raw>::kConst) {
+            if (access_->write.contains(*id) && !access_->read.contains(*id)) {
+                throw std::runtime_error("WorldWriteView: declared write but const query mismatch");
+            }
+            if (!access_->read.contains(*id) && !access_->write.contains(*id)) {
+                throw std::runtime_error("WorldWriteView: undeclared read access in query");
+            }
+        }
+        else {
+            if (!access_->write.contains(*id)) {
+                throw std::runtime_error("WorldWriteView: undeclared write access in query");
+            }
+        }
+    }
+
+    template <typename... Ts>
+    void validateQuery() const { (validateOneQueryAccess<Ts>(), ...); }
 
     World& world_;
     const AccessDeclaration* access_;

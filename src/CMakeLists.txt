@@ -22,6 +22,7 @@ add_library(engine STATIC
   engine/source/vulkan/DeviceContext.cpp
   engine/source/ecs/Entity.cpp
   engine/source/ecs/SystemScheduler.cpp
+  engine/source/ecs/TransactionJournal.cpp
   engine/source/ecs/World.cpp
 )
 
@@ -136,3 +137,18 @@ add_executable(simulation_e2e_tests
 target_compile_features(simulation_e2e_tests PRIVATE cxx_std_23)
 target_link_libraries(simulation_e2e_tests PRIVATE engine)
 target_include_directories(simulation_e2e_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(extract_incremental_tests
+  engine/tests/ExtractIncrementalTests.cpp
+  app/ecs/systems/RenderExtractSys.cpp
+)
+target_compile_features(extract_incremental_tests PRIVATE cxx_std_23)
+target_link_libraries(extract_incremental_tests PRIVATE engine)
+target_include_directories(extract_incremental_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(scheduler_invariant_tests
+  engine/tests/SchedulerInvariantTests.cpp
+)
+target_compile_features(scheduler_invariant_tests PRIVATE cxx_std_23)
+target_link_libraries(scheduler_invariant_tests PRIVATE engine)
+target_include_directories(scheduler_invariant_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

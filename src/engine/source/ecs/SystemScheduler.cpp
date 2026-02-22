@@ -4,6 +4,7 @@
 #include <ecs/StructuralPhase.h>
 
 #include <future>
+#include <queue>
 #include <stdexcept>
 
 void SystemScheduler::addRead(Phase phase, AccessDeclaration access, ReadUpdateFn fn)
@@ -24,6 +25,43 @@ void SystemScheduler::addWrite(Phase phase, AccessDeclaration access, WriteUpdat
         .writeFn = std::move(fn),
         .writes = true
     });
+}
+
+void SystemScheduler::addPhaseDependency(Phase before, Phase after)
+{
+    phaseDependencies_.push_back({ before, after });
+    validatePhaseGraph();
+}
+
+void SystemScheduler::validatePhaseGraph() const
+{
+    constexpr size_t kCount = static_cast<size_t>(Phase::Count);
+    std::array<uint32_t, kCount> indegree{};
+    std::array<std::vector<size_t>, kCount> out{};
+    for (const auto& [before, after] : phaseDependencies_) {
+        const size_t b = static_cast<size_t>(before);
+        const size_t a = static_cast<size_t>(after);
+        out[b].push_back(a);
+        indegree[a] += 1;
+    }
+
+    std::queue<size_t> q{};
+    for (size_t i = 0; i < kCount; ++i) {
+        if (indegree[i] == 0) q.push(i);
+    }
+    size_t seen = 0;
+    while (!q.empty()) {
+        const size_t n = q.front();
+        q.pop();
+        seen += 1;
+        for (size_t child : out[n]) {
+            indegree[child] -= 1;
+            if (indegree[child] == 0) q.push(child);
+        }
+    }
+    if (seen != kCount) {
+        throw std::runtime_error("SystemScheduler phase dependency cycle detected");
+    }
 }
 
 bool SystemScheduler::hasConflict(const AccessDeclaration& lhs, const AccessDeclaration& rhs)
@@ -92,7 +130,7 @@ void SystemScheduler::run(Phase phase, World& world, const SimulationFrameInput&
             futures.reserve(level.size());
             for (size_t idx : level) {
                 futures.push_back(std::async(std::launch::async, [&world, &input, &list, idx]() {
-                    WorldReadView readView{ world, &list[idx].access };
+                    WorldReadView readView{ world, debugAccessValidation_ ? &list[idx].access : nullptr };
                     list[idx].readFn(readView, input);
                 }));
             }
@@ -105,12 +143,14 @@ void SystemScheduler::run(Phase phase, World& world, const SimulationFrameInput&
             for (size_t idx : level) {
                 if (list[idx].writes) {
                     world.endReadPhase();
-                    WorldWriteView writeView{ world, &list[idx].access };
+                    world.beginSystemWriteScope();
+                    WorldWriteView writeView{ world, debugAccessValidation_ ? &list[idx].access : nullptr };
                     list[idx].writeFn(writeView, input);
+                    world.endSystemWriteScope();
                 }
                 else {
                     world.beginReadPhase();
-                    WorldReadView readView{ world, &list[idx].access };
+                    WorldReadView readView{ world, debugAccessValidation_ ? &list[idx].access : nullptr };
                     list[idx].readFn(readView, input);
                     world.endReadPhase();
                 }

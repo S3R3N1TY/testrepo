@@ -27,8 +27,11 @@ public:
 
     void addRead(Phase phase, AccessDeclaration access, ReadUpdateFn fn);
     void addWrite(Phase phase, AccessDeclaration access, WriteUpdateFn fn);
+    void addPhaseDependency(Phase before, Phase after);
+    void setDebugAccessValidation(bool enabled) { debugAccessValidation_ = enabled; }
 
     void run(Phase phase, World& world, const SimulationFrameInput& input) const;
+    void validatePhaseGraph() const;
 
 private:
     struct ScheduledSystem {
@@ -41,4 +44,6 @@ private:
     static bool hasConflict(const AccessDeclaration& lhs, const AccessDeclaration& rhs);
 
     std::array<std::vector<ScheduledSystem>, static_cast<size_t>(Phase::Count)> phases_{};
+    std::vector<std::pair<Phase, Phase>> phaseDependencies_{};
+    bool debugAccessValidation_{ false };
 };
