@@ -2,56 +2,162 @@
 
 #include "../components/RenderComp.h"
 #include "../components/RotationComp.h"
+#include "../components/VisibilityComp.h"
 
 #include <algorithm>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-FrameGraphInput RenderExtractSys::build(const World& world) const
+namespace {
+class PersistentExtractWorkers {
+public:
+    explicit PersistentExtractWorkers(size_t workerCount)
+        : workerCount_(std::max<size_t>(1, workerCount))
+    {
+        workers_.reserve(workerCount_);
+        for (size_t i = 0; i < workerCount_; ++i) {
+            workers_.emplace_back([this, i] { loop(i); });
+        }
+    }
+
+    ~PersistentExtractWorkers()
+    {
+        {
+            std::unique_lock lock(mutex_);
+            stop_ = true;
+            generation_++;
+        }
+        cvStart_.notify_all();
+        for (auto& w : workers_) {
+            if (w.joinable()) w.join();
+        }
+    }
+
+    template <typename Fn>
+    void run(Fn&& fn)
+    {
+        {
+            std::unique_lock lock(mutex_);
+            task_ = std::forward<Fn>(fn);
+            completed_ = 0;
+            generation_++;
+        }
+        cvStart_.notify_all();
+        std::unique_lock lock(mutex_);
+        cvDone_.wait(lock, [&] { return completed_ == workerCount_; });
+    }
+
+    [[nodiscard]] size_t workerCount() const noexcept { return workerCount_; }
+
+private:
+    void loop(size_t idx)
+    {
+        uint64_t seen = 0;
+        while (true) {
+            std::function<void(size_t)> fn;
+            {
+                std::unique_lock lock(mutex_);
+                cvStart_.wait(lock, [&] { return stop_ || generation_ != seen; });
+                if (stop_) {
+                    return;
+                }
+                seen = generation_;
+                fn = task_;
+            }
+
+            if (fn) {
+                fn(idx);
+            }
+
+            {
+                std::unique_lock lock(mutex_);
+                completed_++;
+                if (completed_ == workerCount_) {
+                    cvDone_.notify_one();
+                }
+            }
+        }
+    }
+
+    size_t workerCount_{ 1 };
+    std::vector<std::thread> workers_{};
+    std::mutex mutex_{};
+    std::condition_variable cvStart_{};
+    std::condition_variable cvDone_{};
+    bool stop_{ false };
+    uint64_t generation_{ 0 };
+    size_t completed_{ 0 };
+    std::function<void(size_t)> task_{};
+};
+
+PersistentExtractWorkers& extractWorkers()
 {
-    FrameGraphInput output{};
-    output.runTransferStage = true;
-    output.runComputeStage = true;
+    static PersistentExtractWorkers workers{ std::max<unsigned>(1, std::thread::hardware_concurrency()) };
+    return workers;
+}
+}
 
-    std::unordered_map<uint32_t, RenderViewPacket> viewMap{};
 
-    struct DrawBuildPacket {
-        Entity entity{};
-        DrawPacket draw{};
-    };
 
-    std::vector<DrawBuildPacket> pendingDraws{};
+namespace {
+struct DrawBuildPacket {
+    Entity entity{};
+    DrawPacket draw{};
+};
 
-    world.query<RenderComp, RotationComp>().each([&](Entity entity, const RenderComp& render, const RotationComp& rotation) {
-        if (!render.visible) {
-            return;
+struct ViewBuildPacket {
+    uint32_t viewId{ 0 };
+    bool hasOverride{ false };
+    std::array<float, 4> clearColor{ 0.02F, 0.02F, 0.08F, 1.0F };
+};
+
+struct ChunkInput {
+    const Entity* entities{ nullptr };
+    const RenderComp* render{ nullptr };
+    const RotationComp* rotation{ nullptr };
+    const VisibilityComp* visibility{ nullptr };
+    size_t count{ 0 };
+};
+
+struct WorkerOutput {
+    std::vector<ViewBuildPacket> views{};
+    std::vector<DrawBuildPacket> draws{};
+};
+
+void cullAndEmitChunk(const ChunkInput& input, WorkerOutput& out)
+{
+    for (size_t row = 0; row < input.count; ++row) {
+        const RenderComp& render = input.render[row];
+        const RotationComp& rotation = input.rotation[row];
+        const VisibilityComp& visibility = input.visibility[row];
+        if (!visibility.visible || !render.visible) {
+            continue;
         }
 
-        if (render.overrideClearColor) {
-            viewMap.insert_or_assign(render.viewId, RenderViewPacket{ .viewId = render.viewId, .clearColor = render.clearColor });
-        }
-        else if (!viewMap.contains(render.viewId)) {
-            viewMap.emplace(render.viewId, RenderViewPacket{ .viewId = render.viewId });
-        }
+        out.views.push_back(ViewBuildPacket{
+            .viewId = render.viewId,
+            .hasOverride = render.overrideClearColor,
+            .clearColor = render.clearColor
+        });
 
-        pendingDraws.push_back(DrawBuildPacket{
-            .entity = entity,
+        out.draws.push_back(DrawBuildPacket{
+            .entity = input.entities[row],
             .draw = DrawPacket{
                 .viewId = render.viewId,
                 .materialId = render.materialId,
                 .vertexCount = render.vertexCount,
                 .firstVertex = render.firstVertex,
                 .angleRadians = rotation.angleRadians }
-            });
-    });
-
-    output.views.reserve(viewMap.size());
-    for (const auto& [_, view] : viewMap) {
-        output.views.push_back(view);
+        });
     }
-    std::ranges::sort(output.views, {}, &RenderViewPacket::viewId);
+}
 
+void binMaterials(std::vector<DrawBuildPacket>& pendingDraws, FrameGraphInput& output)
+{
     std::ranges::stable_sort(pendingDraws, [](const DrawBuildPacket& a, const DrawBuildPacket& b) {
         if (a.draw.materialId != b.draw.materialId) {
             return a.draw.materialId < b.draw.materialId;
@@ -93,6 +199,51 @@ FrameGraphInput RenderExtractSys::build(const World& world) const
             .firstDrawPacket = firstDrawIndex,
             .drawPacketCount = static_cast<uint32_t>(output.drawPackets.size()) - firstDrawIndex });
     }
+}
+} // namespace
+FrameGraphInput RenderExtractSys::build(const World& world) const
+{
+    FrameGraphInput output{};
+    output.runTransferStage = true;
+    output.runComputeStage = true;
+
+    std::vector<ChunkInput> chunkInputs{};
+    world.query<const RenderComp, const RotationComp, const VisibilityComp>().eachChunk(
+        [&](const Entity* entities, const RenderComp* render, const RotationComp* rotation, const VisibilityComp* visibility, size_t count) {
+            chunkInputs.push_back(ChunkInput{ .entities = entities, .render = render, .rotation = rotation, .visibility = visibility, .count = count });
+        });
+
+    PersistentExtractWorkers& workers = extractWorkers();
+    std::vector<WorkerOutput> workerOutputs(workers.workerCount());
+
+    workers.run([&](size_t worker) {
+        WorkerOutput& local = workerOutputs[worker];
+        for (size_t i = worker; i < chunkInputs.size(); i += workers.workerCount()) {
+            cullAndEmitChunk(chunkInputs[i], local);
+        }
+    });
+
+    std::unordered_map<uint32_t, RenderViewPacket> viewMap{};
+    std::vector<DrawBuildPacket> pendingDraws{};
+    for (const WorkerOutput& payload : workerOutputs) {
+        for (const ViewBuildPacket& view : payload.views) {
+            if (view.hasOverride) {
+                viewMap.insert_or_assign(view.viewId, RenderViewPacket{ .viewId = view.viewId, .clearColor = view.clearColor });
+            }
+            else if (!viewMap.contains(view.viewId)) {
+                viewMap.emplace(view.viewId, RenderViewPacket{ .viewId = view.viewId });
+            }
+        }
+        pendingDraws.insert(pendingDraws.end(), payload.draws.begin(), payload.draws.end());
+    }
+
+    output.views.reserve(viewMap.size());
+    for (const auto& [_, view] : viewMap) {
+        output.views.push_back(view);
+    }
+    std::ranges::sort(output.views, {}, &RenderViewPacket::viewId);
+
+    binMaterials(pendingDraws, output);
 
     return output;
 }

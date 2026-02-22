@@ -4,9 +4,12 @@
 #include "ecs/components/RenderComp.h"
 #include "ecs/components/RotationComp.h"
 #include "ecs/components/ScaleComp.h"
+#include "ecs/components/VisibilityComp.h"
+#include "ecs/components/DebugTagComp.h"
 
 Simulation::Simulation()
 {
+    world_.setStructuralCommandBuffer(&structuralCommands_);
     createInitialScene();
 }
 
@@ -18,6 +21,8 @@ void Simulation::createInitialScene()
     world_.emplaceComponent<RotationComp>(triangle, RotationComp{
         .angleRadians = 0.0F,
         .angularVelocityRadiansPerSecond = 1.0F });
+    world_.emplaceComponent<VisibilityComp>(triangle, VisibilityComp{ .visible = true });
+    world_.emplaceComponent<DebugTagComp>(triangle, DebugTagComp{ .tag = 42 });
     world_.emplaceComponent<RenderComp>(triangle, RenderComp{
         .viewId = 0,
         .materialId = 1,
@@ -30,7 +35,9 @@ void Simulation::createInitialScene()
 
 void Simulation::tick(const SimulationFrameInput& input)
 {
+    world_.beginFrame();
     spinningSys_.update(world_, input);
+    world_.endFrame();
     frameGraphDirty_ = true;
 }
 
