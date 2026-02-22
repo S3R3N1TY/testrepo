@@ -2,6 +2,7 @@
 
 #include "../components/RenderComp.h"
 #include "../components/RotationComp.h"
+#include "../components/LocalToWorldComp.h"
 #include "../components/VisibilityComp.h"
 
 #include <algorithm>
@@ -120,6 +121,7 @@ struct ChunkInput {
     const RenderComp* render{ nullptr };
     const RotationComp* rotation{ nullptr };
     const VisibilityComp* visibility{ nullptr };
+    const LocalToWorldComp* localToWorld{ nullptr };
     size_t count{ 0 };
 };
 
@@ -134,6 +136,7 @@ void cullAndEmitChunk(const ChunkInput& input, WorkerOutput& out)
         const RenderComp& render = input.render[row];
         const RotationComp& rotation = input.rotation[row];
         const VisibilityComp& visibility = input.visibility[row];
+        const LocalToWorldComp& l2w = input.localToWorld[row];
         if (!visibility.visible || !render.visible) {
             continue;
         }
@@ -151,7 +154,7 @@ void cullAndEmitChunk(const ChunkInput& input, WorkerOutput& out)
                 .materialId = render.materialId,
                 .vertexCount = render.vertexCount,
                 .firstVertex = render.firstVertex,
-                .angleRadians = rotation.angleRadians }
+                .angleRadians = rotation.angleRadians + (l2w.m[12] * 0.001F) }
         });
     }
 }
@@ -203,14 +206,36 @@ void binMaterials(std::vector<DrawBuildPacket>& pendingDraws, FrameGraphInput& o
 } // namespace
 FrameGraphInput RenderExtractSys::build(const World& world) const
 {
+    const auto renderType = world.componentTypeId<RenderComp>();
+    const auto rotationType = world.componentTypeId<RotationComp>();
+    const auto visibilityType = world.componentTypeId<VisibilityComp>();
+    const auto l2wType = world.componentTypeId<LocalToWorldComp>();
+    if (renderType && rotationType && visibilityType && l2wType) {
+        const uint64_t renderVersion = world.componentVersion(*renderType);
+        const uint64_t rotationVersion = world.componentVersion(*rotationType);
+        const uint64_t visibilityVersion = world.componentVersion(*visibilityType);
+        const uint64_t localToWorldVersion = world.componentVersion(*l2wType);
+        if (cached_.runComputeStage &&
+            renderVersion == lastRenderVersion_ &&
+            rotationVersion == lastRotationVersion_ &&
+            visibilityVersion == lastVisibilityVersion_ &&
+            localToWorldVersion == lastLocalToWorldVersion_) {
+            return cached_;
+        }
+        lastRenderVersion_ = renderVersion;
+        lastRotationVersion_ = rotationVersion;
+        lastVisibilityVersion_ = visibilityVersion;
+        lastLocalToWorldVersion_ = localToWorldVersion;
+    }
+
     FrameGraphInput output{};
     output.runTransferStage = true;
     output.runComputeStage = true;
 
     std::vector<ChunkInput> chunkInputs{};
-    world.query<const RenderComp, const RotationComp, const VisibilityComp>().eachChunk(
-        [&](const Entity* entities, const RenderComp* render, const RotationComp* rotation, const VisibilityComp* visibility, size_t count) {
-            chunkInputs.push_back(ChunkInput{ .entities = entities, .render = render, .rotation = rotation, .visibility = visibility, .count = count });
+    world.query<const RenderComp, const RotationComp, const VisibilityComp, const LocalToWorldComp>().eachChunk(
+        [&](const Entity* entities, const RenderComp* render, const RotationComp* rotation, const VisibilityComp* visibility, const LocalToWorldComp* localToWorld, size_t count) {
+            chunkInputs.push_back(ChunkInput{ .entities = entities, .render = render, .rotation = rotation, .visibility = visibility, .localToWorld = localToWorld, .count = count });
         });
 
     PersistentExtractWorkers& workers = extractWorkers();
@@ -245,5 +270,6 @@ FrameGraphInput RenderExtractSys::build(const World& world) const
 
     binMaterials(pendingDraws, output);
 
+    cached_ = output;
     return output;
 }

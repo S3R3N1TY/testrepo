@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <any>
 #include <atomic>
 #include <cassert>
 #include <cstddef>
@@ -14,6 +15,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <new>
 #include <optional>
 #include <stdexcept>
@@ -32,6 +34,28 @@ class Query;
 template <typename... Ts>
 class ConstQuery;
 
+template <typename T>
+struct OptionalComponent {
+    using ValueType = T;
+};
+
+template <typename T>
+using Optional = OptionalComponent<T>;
+
+template <typename T>
+struct QueryArg {
+    using StorageType = std::remove_cv_t<std::remove_reference_t<T>>;
+    static constexpr bool kOptional = false;
+    static constexpr bool kConst = std::is_const_v<std::remove_reference_t<T>>;
+};
+
+template <typename T>
+struct QueryArg<OptionalComponent<T>> {
+    using StorageType = std::remove_cv_t<std::remove_reference_t<T>>;
+    static constexpr bool kOptional = true;
+    static constexpr bool kConst = std::is_const_v<std::remove_reference_t<T>>;
+};
+
 enum class ComponentAccess : uint8_t {
     ReadOnly,
     ReadWrite
@@ -46,6 +70,39 @@ public:
 
     [[nodiscard]] bool isAlive(Entity entity) const;
     [[nodiscard]] const std::vector<Entity>& entities() const noexcept;
+
+    struct EntitySnapshot {
+        struct HotComponentSnapshot {
+            uint32_t typeId{ 0 };
+            std::vector<std::byte> storage{};
+            size_t size{ 0 };
+            size_t align{ 1 };
+            std::function<void(void*)> destroy{};
+
+            HotComponentSnapshot() = default;
+            HotComponentSnapshot(const HotComponentSnapshot&) = delete;
+            HotComponentSnapshot& operator=(const HotComponentSnapshot&) = delete;
+            HotComponentSnapshot(HotComponentSnapshot&& other) noexcept = default;
+            HotComponentSnapshot& operator=(HotComponentSnapshot&& other) noexcept = default;
+            ~HotComponentSnapshot()
+            {
+                if (destroy && !storage.empty()) {
+                    void* raw = storage.data();
+                    size_t space = storage.size();
+                    if (void* aligned = std::align(align, size, raw, space); aligned != nullptr) {
+                        destroy(aligned);
+                    }
+                }
+            }
+        };
+
+        Entity entity{};
+        std::vector<HotComponentSnapshot> hot{};
+        std::unordered_map<std::type_index, std::any> cold{};
+    };
+
+    [[nodiscard]] std::optional<EntitySnapshot> snapshotEntity(Entity entity) const;
+    void restoreEntity(const EntitySnapshot& snapshot);
 
     template <typename T, typename... Args>
     T& emplaceComponent(Entity entity, Args&&... args)
@@ -155,6 +212,7 @@ public:
         std::vector<ComponentAccess> includeAccesses{};
         std::vector<uint32_t> matchingArchetypes{};
         std::vector<std::vector<ColumnRemap>> remapsByArchetype{};
+        std::vector<std::vector<std::optional<ColumnRemap>>> optionalRemapsByArchetype{};
         uint64_t archetypeEpoch{ 0 };
     };
 
@@ -169,13 +227,17 @@ public:
         includeAccesses.reserve(sizeof...(Ts));
 
         (([&] {
-            using Decayed = std::remove_cvref_t<Ts>;
+            using Decayed = typename QueryArg<std::remove_cvref_t<Ts>>::StorageType;
             if constexpr (ComponentResidencyTrait<Decayed>::value == ComponentResidency::HotArchetype) {
                 const auto typeId = findHotComponentType<Decayed>();
                 if (typeId.has_value()) {
-                    includeTypes.push_back(*typeId);
-                    const bool ro = std::is_const_v<std::remove_reference_t<Ts>>;
-                    includeAccesses.push_back(ro ? ComponentAccess::ReadOnly : ComponentAccess::ReadWrite);
+                    if constexpr (QueryArg<std::remove_cvref_t<Ts>>::kOptional) {
+                        optionalTypes.push_back(*typeId);
+                    }
+                    else {
+                        includeTypes.push_back(*typeId);
+                        includeAccesses.push_back(QueryArg<std::remove_cvref_t<Ts>>::kConst ? ComponentAccess::ReadOnly : ComponentAccess::ReadWrite);
+                    }
                 }
             }
         }()), ...);
@@ -365,6 +427,9 @@ private:
 
         std::vector<Entity> entities{};
         std::vector<AlignedColumn> columns{};
+        std::vector<uint64_t> columnVersions{};
+        std::vector<std::vector<uint64_t>> dirtyRowsByColumn{};
+        uint64_t structuralVersion{ 1 };
         size_t count{ 0 };
     };
 
@@ -414,6 +479,8 @@ private:
     public:
         virtual ~IColdPool() = default;
         virtual void remove(Entity entity) = 0;
+        [[nodiscard]] virtual std::optional<std::any> snapshot(Entity entity) const = 0;
+        virtual void restore(Entity entity, const std::any& value) = 0;
     };
 
     template <typename T>
@@ -461,6 +528,20 @@ private:
         {
             auto it = sparse_.find(entity.id);
             return it == sparse_.end() ? nullptr : &dense_[it->second];
+        }
+
+        [[nodiscard]] std::optional<std::any> snapshot(Entity entity) const override
+        {
+            auto it = sparse_.find(entity.id);
+            if (it == sparse_.end()) {
+                return std::nullopt;
+            }
+            return std::any{ dense_[it->second] };
+        }
+
+        void restore(Entity entity, const std::any& value) override
+        {
+            emplace(entity, std::any_cast<const T&>(value));
         }
 
     private:
@@ -564,6 +645,7 @@ private:
                 void* dst = componentPtr(chunk, colIt->second, record.row, hotComponentMeta_[newType].size);
                 *reinterpret_cast<T*>(dst) = std::move(value);
                 bumpVersion(newType);
+                bumpChunkVersion(record.archetypeId, record.chunkIndex, newType);
                 return *reinterpret_cast<T*>(dst);
             }
         }
@@ -584,6 +666,7 @@ private:
         Chunk& dstChunk = dstArch.chunks[inserted.chunkIndex];
         const size_t col = dstArch.columnByType.at(newType);
         bumpVersion(newType);
+        bumpChunkVersion(inserted.archetypeId, inserted.chunkIndex, newType);
         return *reinterpret_cast<T*>(componentPtr(dstChunk, col, inserted.row, hotComponentMeta_[newType].size));
     }
 
@@ -617,6 +700,13 @@ private:
     void eraseFromArchetype(uint32_t archetypeId, uint32_t chunkIndex, uint32_t row);
     void validateAlive(Entity entity) const;
     void bumpVersion(ComponentTypeId typeId);
+    void bumpChunkVersion(uint32_t archetypeId, uint32_t chunkIndex, ComponentTypeId typeId);
+    void emplaceHotComponentCloned(Entity entity, ComponentTypeId typeId, const void* componentData);
+    void markChunkComponentDirty(uint32_t archetypeId, uint32_t chunkIndex, ComponentTypeId typeId, uint32_t row);
+
+public:
+    [[nodiscard]] uint64_t chunkVersion(ChunkHandle handle, uint32_t componentType) const;
+    [[nodiscard]] uint64_t chunkStructuralVersion(ChunkHandle handle) const;
 
     std::vector<EntityRecord> records_{};
     std::vector<uint32_t> freeList_{};
@@ -630,6 +720,7 @@ private:
     uint64_t archetypeEpoch_{ 0 };
 
     mutable std::unordered_map<QueryKey, QueryPlan, QueryKeyHash> queryPlans_{};
+    mutable std::shared_mutex queryPlansMutex_{};
 
     std::unordered_map<std::type_index, std::unique_ptr<IColdPool>> coldPools_{};
 

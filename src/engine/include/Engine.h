@@ -55,5 +55,6 @@ public:
         const char* fragmentShaderPath{ nullptr };
     };
 
-    void run(IGameSimulation& game, const RunConfig& config = RunConfig{});
+    void run(IGameSimulation& game, const RunConfig& config);
+    void run(IGameSimulation& game);
 };

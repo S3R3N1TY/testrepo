@@ -114,3 +114,25 @@ target_compile_definitions(app PRIVATE
   APP_VERT_SHADER_PATH="shaders/triangle.vert.spv"
   APP_FRAG_SHADER_PATH="shaders/triangle.frag.spv"
 )
+
+
+# -----------------------------
+# ECS tests
+# -----------------------------
+add_executable(ecs_world_tests
+  engine/tests/EcsWorldTests.cpp
+)
+
+target_compile_features(ecs_world_tests PRIVATE cxx_std_23)
+target_link_libraries(ecs_world_tests PRIVATE engine)
+target_include_directories(ecs_world_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(simulation_e2e_tests
+  engine/tests/SimulationE2ETests.cpp
+  app/Simulation.cpp
+  app/ecs/systems/RenderExtractSys.cpp
+)
+
+target_compile_features(simulation_e2e_tests PRIVATE cxx_std_23)
+target_link_libraries(simulation_e2e_tests PRIVATE engine)
+target_include_directories(simulation_e2e_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

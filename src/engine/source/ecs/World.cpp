@@ -3,6 +3,13 @@
 
 #include <algorithm>
 
+namespace {
+struct IncludeTerm {
+    uint32_t type{ 0 };
+    ComponentAccess access{ ComponentAccess::ReadOnly };
+};
+}
+
 Entity World::createEntity()
 {
     if (!mutationEnabled_) {
@@ -73,6 +80,89 @@ const std::vector<Entity>& World::entities() const noexcept
     return aliveEntities_;
 }
 
+std::optional<World::EntitySnapshot> World::snapshotEntity(Entity entity) const
+{
+    if (!isAlive(entity)) {
+        return std::nullopt;
+    }
+
+    EntitySnapshot snapshot{};
+    snapshot.entity = entity;
+
+    const EntityRecord& rec = records_[entity.id];
+    if (rec.archetypeId != kInvalidArchetype) {
+        const Archetype& arch = archetypes_[rec.archetypeId];
+        const Chunk& chunk = arch.chunks[rec.chunkIndex];
+        snapshot.hot.reserve(arch.key.signature.size());
+        for (size_t col = 0; col < arch.key.signature.size(); ++col) {
+            const ComponentTypeId typeId = arch.key.signature[col];
+            const ComponentMeta& meta = hotComponentMeta_[typeId];
+            const std::byte* src = static_cast<const std::byte*>(componentPtr(chunk, col, rec.row, meta.size));
+            EntitySnapshot::HotComponentSnapshot comp{};
+            comp.typeId = typeId;
+            comp.size = meta.size;
+            comp.align = meta.align;
+            comp.destroy = meta.destroy;
+            comp.storage.resize(meta.size + meta.align);
+            void* raw = comp.storage.data();
+            size_t space = comp.storage.size();
+            void* dst = std::align(meta.align, meta.size, raw, space);
+            if (dst == nullptr) {
+                throw std::runtime_error("World::snapshotEntity failed to align snapshot storage");
+            }
+            meta.copyConstruct(dst, src);
+            snapshot.hot.push_back(std::move(comp));
+        }
+    }
+
+    for (const auto& [typeKey, pool] : coldPools_) {
+        if (auto value = pool->snapshot(entity); value.has_value()) {
+            snapshot.cold.insert_or_assign(typeKey, std::move(*value));
+        }
+    }
+
+    return snapshot;
+}
+
+void World::restoreEntity(const EntitySnapshot& snapshot)
+{
+    if (snapshot.entity.id >= records_.size()) {
+        records_.resize(snapshot.entity.id + 1);
+    }
+
+    EntityRecord& rec = records_[snapshot.entity.id];
+    if (rec.alive) {
+        return;
+    }
+
+    rec.alive = true;
+    rec.generation = snapshot.entity.generation;
+    rec.archetypeId = kInvalidArchetype;
+    rec.chunkIndex = kInvalidChunk;
+    rec.row = 0;
+
+    freeList_.erase(std::remove(freeList_.begin(), freeList_.end(), snapshot.entity.id), freeList_.end());
+    aliveEntities_.push_back(snapshot.entity);
+
+    for (const auto& hot : snapshot.hot) {
+        const ComponentMeta& meta = hotComponentMeta_[hot.typeId];
+        void* raw = const_cast<std::byte*>(hot.storage.data());
+        size_t space = hot.storage.size();
+        void* src = std::align(meta.align, meta.size, raw, space);
+        if (src == nullptr) {
+            throw std::runtime_error("World::restoreEntity failed to align snapshot storage");
+        }
+        emplaceHotComponentCloned(snapshot.entity, hot.typeId, src);
+    }
+
+    for (const auto& [typeKey, value] : snapshot.cold) {
+        auto it = coldPools_.find(typeKey);
+        if (it != coldPools_.end()) {
+            it->second->restore(snapshot.entity, value);
+        }
+    }
+}
+
 
 const World::QueryPlan& World::queryPlanDynamic(
     std::vector<uint32_t> includeTypes,
@@ -80,19 +170,50 @@ const World::QueryPlan& World::queryPlanDynamic(
     std::vector<uint32_t> excludeTypes,
     std::vector<uint32_t> optionalTypes) const
 {
+    std::vector<IncludeTerm> includeTerms{};
+    includeTerms.reserve(includeTypes.size());
+    for (size_t i = 0; i < includeTypes.size(); ++i) {
+        includeTerms.push_back(IncludeTerm{ .type = includeTypes[i], .access = includeAccesses[i] });
+    }
+
+    std::ranges::sort(includeTerms, {}, &IncludeTerm::type);
+
+    std::vector<IncludeTerm> mergedTerms{};
+    mergedTerms.reserve(includeTerms.size());
+    for (const IncludeTerm& term : includeTerms) {
+        if (!mergedTerms.empty() && mergedTerms.back().type == term.type) {
+            if (term.access == ComponentAccess::ReadWrite) {
+                mergedTerms.back().access = ComponentAccess::ReadWrite;
+            }
+            continue;
+        }
+        mergedTerms.push_back(term);
+    }
+
+    includeTypes.clear();
+    includeAccesses.clear();
+    includeTypes.reserve(mergedTerms.size());
+    includeAccesses.reserve(mergedTerms.size());
+    for (const IncludeTerm& term : mergedTerms) {
+        includeTypes.push_back(term.type);
+        includeAccesses.push_back(term.access);
+    }
+
     if (includeTypes.empty()) {
         static QueryPlan empty{};
         return empty;
     }
 
-    canonicalizeTypes(includeTypes);
     canonicalizeTypes(excludeTypes);
     canonicalizeTypes(optionalTypes);
 
     const QueryKey key{ includeTypes, excludeTypes, optionalTypes, includeAccesses };
-    auto it = queryPlans_.find(key);
-    if (it != queryPlans_.end() && it->second.archetypeEpoch == archetypeEpoch_) {
-        return it->second;
+    {
+        std::shared_lock lock(queryPlansMutex_);
+        auto it = queryPlans_.find(key);
+        if (it != queryPlans_.end() && it->second.archetypeEpoch == archetypeEpoch_) {
+            return it->second;
+        }
     }
 
     QueryPlan rebuilt{};
@@ -127,8 +248,26 @@ const World::QueryPlan& World::queryPlanDynamic(
 
         rebuilt.matchingArchetypes.push_back(archetypeId);
         rebuilt.remapsByArchetype.push_back(std::move(remap));
+
+        std::vector<std::optional<QueryPlan::ColumnRemap>> optionalRemaps{};
+        optionalRemaps.reserve(optionalTypes.size());
+        for (uint32_t optionalType : optionalTypes) {
+            const auto colIt = archetype.columnByType.find(optionalType);
+            if (colIt == archetype.columnByType.end()) {
+                optionalRemaps.push_back(std::nullopt);
+                continue;
+            }
+            optionalRemaps.push_back(QueryPlan::ColumnRemap{
+                .componentType = optionalType,
+                .access = ComponentAccess::ReadOnly,
+                .columnIndex = colIt->second,
+                .componentSize = hotComponentMeta_[optionalType].size
+            });
+        }
+        rebuilt.optionalRemapsByArchetype.push_back(std::move(optionalRemaps));
     }
 
+    std::unique_lock lock(queryPlansMutex_);
     auto [newIt, _] = queryPlans_.insert_or_assign(key, std::move(rebuilt));
     return newIt->second;
 }
@@ -189,9 +328,13 @@ World::HotInsertResult World::moveEntityToArchetype(Entity entity,
     if (dstArch.chunks.empty() || dstArch.chunks.back().count >= kChunkCapacity) {
         Chunk newChunk{ kChunkCapacity };
         newChunk.columns.reserve(dstArch.key.signature.size());
+        newChunk.columnVersions.reserve(dstArch.key.signature.size());
+        const size_t dirtyWords = (kChunkCapacity + 63) / 64;
         for (const ComponentTypeId id : dstArch.key.signature) {
             const ComponentMeta& meta = hotComponentMeta_[id];
             newChunk.columns.push_back(AlignedColumn::create(kChunkCapacity * meta.size, meta.align));
+            newChunk.columnVersions.push_back(1);
+            newChunk.dirtyRowsByColumn.push_back(std::vector<uint64_t>(dirtyWords, 0));
         }
         dstArch.chunks.push_back(std::move(newChunk));
     }
@@ -234,6 +377,7 @@ World::HotInsertResult World::moveEntityToArchetype(Entity entity,
     }
 
     dstChunk.count += 1;
+    dstChunk.structuralVersion += 1;
 
     if (oldRecord.archetypeId != kInvalidArchetype) {
         eraseFromArchetype(oldRecord.archetypeId, oldRecord.chunkIndex, oldRecord.row);
@@ -260,7 +404,10 @@ uint32_t World::archetypeForSignature(const std::vector<ComponentTypeId>& signat
     archetypes_.push_back(std::move(arch));
     archetypeByKey_.insert_or_assign(std::move(key), id);
     archetypeEpoch_ += 1;
-    queryPlans_.clear();
+    {
+        std::unique_lock lock(queryPlansMutex_);
+        queryPlans_.clear();
+    }
     return id;
 }
 
@@ -294,6 +441,7 @@ void World::eraseFromArchetype(uint32_t archetypeId, uint32_t chunkIndex, uint32
     }
 
     chunk.count -= 1;
+    chunk.structuralVersion += 1;
 }
 
 void World::validateAlive(Entity entity) const
@@ -342,4 +490,100 @@ void World::bumpVersion(ComponentTypeId typeId)
     if (typeId < hotComponentMeta_.size()) {
         hotComponentMeta_[typeId].version += 1;
     }
+}
+
+void World::bumpChunkVersion(uint32_t archetypeId, uint32_t chunkIndex, ComponentTypeId typeId)
+{
+    if (archetypeId == kInvalidArchetype || chunkIndex == kInvalidChunk) {
+        return;
+    }
+    Archetype& arch = archetypes_[archetypeId];
+    auto colIt = arch.columnByType.find(typeId);
+    if (colIt == arch.columnByType.end()) {
+        return;
+    }
+    Chunk& chunk = arch.chunks[chunkIndex];
+    chunk.columnVersions[colIt->second] += 1;
+}
+
+void World::emplaceHotComponentCloned(Entity entity, ComponentTypeId typeId, const void* componentData)
+{
+    EntityRecord& record = records_[entity.id];
+    if (record.archetypeId != kInvalidArchetype) {
+        Archetype& arch = archetypes_[record.archetypeId];
+        auto colIt = arch.columnByType.find(typeId);
+        if (colIt != arch.columnByType.end()) {
+            Chunk& chunk = arch.chunks[record.chunkIndex];
+            void* dst = componentPtr(chunk, colIt->second, record.row, hotComponentMeta_[typeId].size);
+            const ComponentMeta& meta = hotComponentMeta_[typeId];
+            meta.destroy(dst);
+            meta.copyConstruct(dst, componentData);
+            bumpVersion(typeId);
+            bumpChunkVersion(record.archetypeId, record.chunkIndex, typeId);
+            return;
+        }
+    }
+
+    std::vector<ComponentTypeId> signature{};
+    if (record.archetypeId != kInvalidArchetype) {
+        signature = archetypes_[record.archetypeId].key.signature;
+    }
+    signature.push_back(typeId);
+    canonicalizeTypes(signature);
+
+    const HotInsertResult inserted = moveEntityToArchetype(entity, signature, typeId, componentData);
+    record.archetypeId = inserted.archetypeId;
+    record.chunkIndex = inserted.chunkIndex;
+    record.row = inserted.row;
+    bumpVersion(typeId);
+    bumpChunkVersion(inserted.archetypeId, inserted.chunkIndex, typeId);
+}
+
+
+void World::markChunkComponentDirty(uint32_t archetypeId, uint32_t chunkIndex, ComponentTypeId typeId, uint32_t row)
+{
+    if (archetypeId == kInvalidArchetype || chunkIndex == kInvalidChunk) {
+        return;
+    }
+    Archetype& arch = archetypes_[archetypeId];
+    auto colIt = arch.columnByType.find(typeId);
+    if (colIt == arch.columnByType.end()) {
+        return;
+    }
+    Chunk& chunk = arch.chunks[chunkIndex];
+    const size_t word = row / 64;
+    const uint64_t bit = uint64_t{1} << (row % 64);
+    if (word < chunk.dirtyRowsByColumn[colIt->second].size()) {
+        chunk.dirtyRowsByColumn[colIt->second][word] |= bit;
+    }
+    bumpVersion(typeId);
+    bumpChunkVersion(archetypeId, chunkIndex, typeId);
+}
+
+uint64_t World::chunkVersion(ChunkHandle handle, uint32_t componentType) const
+{
+    if (handle.archetypeId >= archetypes_.size()) {
+        return 0;
+    }
+    const Archetype& arch = archetypes_[handle.archetypeId];
+    if (handle.chunkIndex >= arch.chunks.size()) {
+        return 0;
+    }
+    const auto colIt = arch.columnByType.find(componentType);
+    if (colIt == arch.columnByType.end()) {
+        return 0;
+    }
+    return arch.chunks[handle.chunkIndex].columnVersions[colIt->second];
+}
+
+uint64_t World::chunkStructuralVersion(ChunkHandle handle) const
+{
+    if (handle.archetypeId >= archetypes_.size()) {
+        return 0;
+    }
+    const Archetype& arch = archetypes_[handle.archetypeId];
+    if (handle.chunkIndex >= arch.chunks.size()) {
+        return 0;
+    }
+    return arch.chunks[handle.chunkIndex].structuralVersion;
 }
