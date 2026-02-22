@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Engine.h>
+#include <ecs/StructuralCommandBuffer.h>
 #include <ecs/World.h>
 
 #include "ecs/systems/RenderExtractSys.h"
@@ -17,6 +18,7 @@ private:
     void createInitialScene();
 
     World world_{};
+    StructuralCommandBuffer structuralCommands_{};
     SpinningSys spinningSys_{};
     RenderExtractSys renderExtractSys_{};
 
