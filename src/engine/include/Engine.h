@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 struct SimulationFrameInput {
@@ -9,40 +10,85 @@ struct SimulationFrameInput {
     uint64_t frameIndex{ 0 };
 };
 
-struct RenderViewPacket {
+struct RenderMaterialRef {
+    uint32_t id{ 0 };
+};
+
+struct RenderMeshRef {
+    uint32_t id{ 0 };
+    uint32_t vertexCount{ 3 };
+    uint32_t firstVertex{ 0 };
+};
+
+struct RenderViewSnapshot {
     uint32_t viewId{ 0 };
     std::array<float, 4> clearColor{ 0.02F, 0.02F, 0.08F, 1.0F };
 };
 
-struct MaterialBatchPacket {
-    uint32_t materialId{ 0 };
-    uint32_t firstDrawPacket{ 0 };
-    uint32_t drawPacketCount{ 0 };
-};
-
-struct DrawPacket {
+struct RenderInstanceSnapshot {
+    uint64_t instanceId{ 0 };
     uint32_t viewId{ 0 };
-    uint32_t materialId{ 0 };
-    uint32_t vertexCount{ 3 };
-    uint32_t firstVertex{ 0 };
-    float angleRadians{ 0.0F };
-    std::array<float, 3> worldPosition{ 0.0F, 0.0F, 0.0F };
-    uint32_t worldEntityId{ 0 };
+    uint32_t entityId{ 0 };
+    std::array<float, 16> localToWorld{
+        1.0F, 0.0F, 0.0F, 0.0F,
+        0.0F, 1.0F, 0.0F, 0.0F,
+        0.0F, 0.0F, 1.0F, 0.0F,
+        0.0F, 0.0F, 0.0F, 1.0F
+    };
+    RenderMeshRef mesh{};
+    RenderMaterialRef material{};
+    uint32_t visibilityMask{ 0xFFFFFFFFu };
+    struct Bounds {
+        std::array<float, 3> center{ 0.0F, 0.0F, 0.0F };
+        float radius{ 0.0F };
+    };
+    std::optional<Bounds> worldBounds{};
 };
 
-struct FrameGraphInput {
-    std::vector<RenderViewPacket> views{};
-    std::vector<MaterialBatchPacket> materialBatches{};
-    std::vector<DrawPacket> drawPackets{};
-    bool runTransferStage{ true };
-    bool runComputeStage{ true };
+
+struct RenderMaterialGroupSnapshot {
+    uint32_t materialId{ 0 };
+    uint32_t firstInstance{ 0 };
+    uint32_t instanceCount{ 0 };
+};
+
+struct RenderLightSnapshot {
+    uint32_t lightId{ 0 };
+    std::array<float, 3> worldPosition{ 0.0F, 0.0F, 0.0F };
+    float intensity{ 1.0F };
+};
+
+struct RenderMeshCatalogEntry {
+    uint32_t id{ 0 };
+    uint32_t vertexCount{ 0 };
+    uint32_t firstVertex{ 0 };
+    uint64_t generation{ 0 };
+};
+
+struct RenderMaterialCatalogEntry {
+    uint32_t id{ 0 };
+    uint64_t generation{ 0 };
+};
+
+struct RenderAssetCatalogSnapshot {
+    uint64_t simulationFrameIndex{ 0 };
+    std::vector<RenderMeshCatalogEntry> meshes{};
+    std::vector<RenderMaterialCatalogEntry> materials{};
+};
+
+struct RenderWorldSnapshot {
+    uint64_t simulationFrameIndex{ 0 };
+    std::vector<RenderViewSnapshot> views{};
+    std::vector<RenderInstanceSnapshot> instances{};
+    std::vector<RenderMaterialGroupSnapshot> materialGroups{};
+    std::vector<RenderLightSnapshot> lights{};
 };
 
 class IGameSimulation {
 public:
     virtual ~IGameSimulation() = default;
     virtual void tick(const SimulationFrameInput& input) = 0;
-    [[nodiscard]] virtual FrameGraphInput buildFrameGraphInput() const = 0;
+    [[nodiscard]] virtual RenderWorldSnapshot buildRenderSnapshot() const = 0;
 };
 
 class Engine

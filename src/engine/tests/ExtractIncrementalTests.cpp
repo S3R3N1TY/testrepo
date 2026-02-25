@@ -10,24 +10,12 @@
 #include <cassert>
 #include <vector>
 
-
 namespace {
-bool sameDraws(const std::vector<DrawPacket>& a, const std::vector<DrawPacket>& b)
+bool sameInstances(const std::vector<RenderInstanceSnapshot>& a, const std::vector<RenderInstanceSnapshot>& b)
 {
     if (a.size() != b.size()) return false;
     for (size_t i = 0; i < a.size(); ++i) {
-        if (a[i].viewId != b[i].viewId || a[i].materialId != b[i].materialId || a[i].worldEntityId != b[i].worldEntityId || a[i].angleRadians != b[i].angleRadians) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool sameBatches(const std::vector<MaterialBatchPacket>& a, const std::vector<MaterialBatchPacket>& b)
-{
-    if (a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); ++i) {
-        if (a[i].materialId != b[i].materialId || a[i].firstDrawPacket != b[i].firstDrawPacket || a[i].drawPacketCount != b[i].drawPacketCount) {
+        if (a[i].viewId != b[i].viewId || a[i].material.id != b[i].material.id || a[i].entityId != b[i].entityId) {
             return false;
         }
     }
@@ -42,7 +30,7 @@ int main()
     entities.reserve(130);
     for (uint32_t i = 0; i < 130; ++i) {
         Entity e = world.createEntity();
-        world.emplaceComponent<RenderComp>(e, RenderComp{ .viewId = i % 2, .materialId = (i % 4) + 1, .vertexCount = 3, .firstVertex = 0, .visible = true });
+        world.emplaceComponent<RenderComp>(e, RenderComp{ .viewId = i % 2, .materialId = (i % 4) + 1, .meshId = 1, .vertexCount = 3, .firstVertex = 0, .visible = true });
         world.emplaceComponent<RotationComp>(e, RotationComp{ .angleRadians = static_cast<float>(i), .angularVelocityRadiansPerSecond = 1.0F });
         world.emplaceComponent<VisibilityComp>(e, VisibilityComp{ .visible = true });
         world.emplaceComponent<LocalToWorldComp>(e);
@@ -50,14 +38,14 @@ int main()
     }
 
     RenderExtractSys extract{};
-    const FrameGraphInput first = extract.build(world);
+    const RenderWorldSnapshot first = extract.build(world, 1);
     assert(extract.lastRebuiltChunkCount() > 0);
 
-    const FrameGraphInput second = extract.build(world);
+    const RenderWorldSnapshot second = extract.build(world, 2);
     assert(extract.lastReusedChunkCount() > 0);
     assert(extract.lastRebuiltChunkCount() == 0);
-    assert(sameDraws(first.drawPackets, second.drawPackets));
-    assert(sameBatches(first.materialBatches, second.materialBatches));
+    assert(sameInstances(first.instances, second.instances));
+    assert(!first.materialGroups.empty());
 
     world.beginSystemWriteScope();
     world.query<RotationComp>().each([&](Entity e, WriteRef<RotationComp> rot) {
@@ -68,12 +56,11 @@ int main()
     });
     world.endSystemWriteScope();
 
-    const FrameGraphInput third = extract.build(world);
+    const RenderWorldSnapshot third = extract.build(world, 3);
     assert(extract.lastRebuiltChunkCount() == 1);
 
-    const FrameGraphInput fourth = extract.build(world);
-    assert(sameDraws(third.drawPackets, fourth.drawPackets));
-    assert(sameBatches(third.materialBatches, fourth.materialBatches));
+    const RenderWorldSnapshot fourth = extract.build(world, 4);
+    assert(sameInstances(third.instances, fourth.instances));
 
     return 0;
 }
