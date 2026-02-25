@@ -16,17 +16,35 @@
 #include "ecs/components/LightComp.h"
 
 #include <ecs/FrameViews.h>
+#include <renderer/RuntimeAssetService.h>
 
 #include <algorithm>
 #include <cmath>
 
 Simulation::Simulation()
+    : Simulation(AssetBindingConfig{})
 {
+}
+
+Simulation::Simulation(AssetBindingConfig assetBindings)
+    : assetBindings_(assetBindings)
+{
+    auto& runtimeAssets = RuntimeAssetService::instance();
+    if (runtimeAssets.initializeDefaultBackend() && runtimeAssets.refreshFromBackend()) {
+        const auto catalog = runtimeAssets.snapshot(0);
+        if (!catalog.meshes.empty()) {
+            assetBindings_.meshId = catalog.meshes.front().id;
+        }
+        if (!catalog.materials.empty()) {
+            assetBindings_.materialId = catalog.materials.front().id;
+        }
+    }
     world_.setStructuralCommandBuffer(&structuralCommands_);
     scheduler_.setDebugAccessValidation(true);
     scheduler_.addPhaseDependency(SystemScheduler::Phase::PreSim, SystemScheduler::Phase::Sim);
     scheduler_.addPhaseDependency(SystemScheduler::Phase::Sim, SystemScheduler::Phase::PostSim);
     scheduler_.addPhaseDependency(SystemScheduler::Phase::PostSim, SystemScheduler::Phase::RenderExtract);
+
     createInitialScene();
     configureScheduler();
     scheduler_.finalizeConfiguration();
@@ -292,10 +310,13 @@ void Simulation::configureScheduler()
     if (auto l2w = world_.componentTypeId<LocalToWorldComp>(); l2w.has_value()) {
         renderExtractAccess.read.insert(*l2w);
     }
+    if (auto light = world_.componentTypeId<LightComp>(); light.has_value()) {
+        renderExtractAccess.read.insert(*light);
+    }
 
     scheduler_.addRead(SystemScheduler::Phase::RenderExtract, std::move(renderExtractAccess),
-        [this](const WorldReadView&, const SimulationFrameInput&) {
-            cachedFrameGraphInput_ = renderExtractSys_.build(world_);
+        [this](const WorldReadView&, const SimulationFrameInput& input) {
+            cachedRenderSnapshot_ = renderExtractSys_.build(world_, input.frameIndex);
         });
 }
 
@@ -318,7 +339,8 @@ void Simulation::createInitialScene()
     world_.emplaceComponent<DebugTagComp>(triangle, DebugTagComp{ .tag = 42 });
     world_.emplaceComponent<RenderComp>(triangle, RenderComp{
         .viewId = 0,
-        .materialId = 1,
+        .materialId = assetBindings_.materialId,
+        .meshId = assetBindings_.meshId,
         .vertexCount = 3,
         .firstVertex = 0,
         .visible = true,
@@ -340,7 +362,7 @@ void Simulation::tick(const SimulationFrameInput& input)
     world_.endFrame();
 }
 
-FrameGraphInput Simulation::buildFrameGraphInput() const
+RenderWorldSnapshot Simulation::buildRenderSnapshot() const
 {
-    return cachedFrameGraphInput_;
+    return cachedRenderSnapshot_;
 }

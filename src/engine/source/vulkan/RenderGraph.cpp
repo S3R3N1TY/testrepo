@@ -7,6 +7,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_set>
+#include <stdexcept>
 
 namespace {
 struct EdgeHash {
@@ -144,6 +145,7 @@ void RenderTaskGraph::clear()
 {
     resources_.clear();
     passes_.clear();
+    explicitDependencies_.clear();
     presentRequest_.reset();
     nextResourceId_ = 1;
 }
@@ -263,6 +265,18 @@ RenderTaskGraph::PassId RenderTaskGraph::addPass(PassNode pass)
     const PassId id = passes_.size();
     passes_.push_back(std::move(pass));
     return id;
+}
+
+void RenderTaskGraph::addDependency(PassId producer, PassId consumer, VkPipelineStageFlags2 consumerWaitStage)
+{
+    if (producer >= passes_.size() || consumer >= passes_.size()) {
+        throw std::out_of_range("RenderTaskGraph::addDependency pass id out of range");
+    }
+    explicitDependencies_.push_back(ExplicitDependency{
+        .producer = producer,
+        .consumer = consumer,
+        .consumerWaitStage = consumerWaitStage != 0 ? consumerWaitStage : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT
+    });
 }
 
 void RenderTaskGraph::setPresent(const SubmissionScheduler::PresentRequest& request)
@@ -526,6 +540,10 @@ vkutil::VkExpected<void> RenderTaskGraph::buildDependenciesAndBarriers(
             .consumerWaitStage = consumerStage != 0 ? consumerStage : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT
             });
     };
+
+    for (const ExplicitDependency& dep : explicitDependencies_) {
+        addEdge(dep.producer, dep.consumer, dep.consumerWaitStage);
+    }
 
     for (PassId passId = 0; passId < passes_.size(); ++passId) {
         const PassNode& pass = passes_[passId];

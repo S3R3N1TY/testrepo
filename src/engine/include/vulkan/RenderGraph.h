@@ -160,14 +160,22 @@ public:
         VkAccessFlags2 initialAccessMask = VK_ACCESS_2_NONE,
         uint32_t initialQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED);
     [[nodiscard]] PassId addPass(PassNode pass);
+    void addDependency(PassId producer, PassId consumer, VkPipelineStageFlags2 consumerWaitStage = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
     void setPresent(const SubmissionScheduler::PresentRequest& request);
 
     [[nodiscard]] vkutil::VkExpected<std::vector<CompiledPass>> compile() const;
     [[nodiscard]] vkutil::VkExpected<CompiledTransientPlan> compileTransientPlan() const;
     [[nodiscard]] vkutil::VkExpected<SubmissionScheduler::FrameExecutionResult> execute(SubmissionScheduler& scheduler) const;
 
+
 private:
     struct Edge {
+        PassId producer{ 0 };
+        PassId consumer{ 0 };
+        VkPipelineStageFlags2 consumerWaitStage{ VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT };
+    };
+
+    struct ExplicitDependency {
         PassId producer{ 0 };
         PassId consumer{ 0 };
         VkPipelineStageFlags2 consumerWaitStage{ VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT };
@@ -229,6 +237,7 @@ private:
 
     std::unordered_map<ResourceId, ResourceDescriptor> resources_{};
     std::vector<PassNode> passes_{};
+    std::vector<ExplicitDependency> explicitDependencies_{};
     std::optional<SubmissionScheduler::PresentRequest> presentRequest_{};
     ResourceId nextResourceId_{ 1 };
 };
