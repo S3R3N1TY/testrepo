@@ -1299,7 +1299,8 @@ private:
                 .deltaSeconds = deltaSeconds,
                 .frameIndex = frameIndex
                 });
-            runtimeAssetService.refreshFromBackend();
+            const bool refreshOk = runtimeAssetService.refreshFromBackend();
+            (void)refreshOk;
             const auto writeTicket = snapshotRing.beginWrite();
             *writeTicket.snapshot = game.buildRenderSnapshot();
             snapshotRing.publish(writeTicket);

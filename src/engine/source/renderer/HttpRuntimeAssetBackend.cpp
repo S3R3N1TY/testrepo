@@ -8,6 +8,48 @@
 #include <utility>
 
 namespace {
+[[nodiscard]] std::optional<std::string> readEnvVar(const char* key)
+{
+#if defined(_MSC_VER)
+    char* buffer = nullptr;
+    size_t size = 0;
+    const errno_t rc = _dupenv_s(&buffer, &size, key);
+    if (rc != 0 || buffer == nullptr || size == 0 || buffer[0] == '\0') {
+        if (buffer != nullptr) {
+            free(buffer);
+        }
+        return std::nullopt;
+    }
+
+    std::string value{ buffer };
+    free(buffer);
+    return value;
+#else
+    if (const char* value = std::getenv(key); value != nullptr && value[0] != '\0') {
+        return std::string{ value };
+    }
+    return std::nullopt;
+#endif
+}
+
+[[nodiscard]] FILE* openPipe(const std::string& command)
+{
+#if defined(_WIN32)
+    return _popen(command.c_str(), "r");
+#else
+    return popen(command.c_str(), "r");
+#endif
+}
+
+[[nodiscard]] int closePipe(FILE* pipe)
+{
+#if defined(_WIN32)
+    return _pclose(pipe);
+#else
+    return pclose(pipe);
+#endif
+}
+
 [[nodiscard]] std::vector<std::string> splitCsv(const std::string& line)
 {
     std::vector<std::string> fields{};
@@ -158,8 +200,8 @@ std::optional<std::string> HttpRuntimeAssetBackend::httpGet(const std::string& u
     }
 
     std::string headerArgs;
-    if (const char* authToken = std::getenv("RUNTIME_ASSET_BEARER_TOKEN"); authToken != nullptr) {
-        const std::string token{ authToken };
+    if (const auto authToken = readEnvVar("RUNTIME_ASSET_BEARER_TOKEN"); authToken.has_value()) {
+        const std::string& token = *authToken;
         if (isSafeToken(token)) {
             headerArgs = " -H \"Authorization: Bearer " + token + "\"";
         }
@@ -168,7 +210,7 @@ std::optional<std::string> HttpRuntimeAssetBackend::httpGet(const std::string& u
     const std::string cmd =
         "curl -fsSL --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 2 --max-time 5" + headerArgs +
         " \"" + url + "\"";
-    FILE* pipe = popen(cmd.c_str(), "r");
+    FILE* pipe = openPipe(cmd);
     if (pipe == nullptr) {
         return std::nullopt;
     }
@@ -179,7 +221,7 @@ std::optional<std::string> HttpRuntimeAssetBackend::httpGet(const std::string& u
         out.append(buffer.data());
     }
 
-    const int rc = pclose(pipe);
+    const int rc = closePipe(pipe);
     if (rc != 0 || out.empty()) {
         return std::nullopt;
     }

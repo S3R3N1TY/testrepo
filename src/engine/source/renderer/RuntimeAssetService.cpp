@@ -7,6 +7,7 @@
 #include <array>
 #include <chrono>
 #include <cstdlib>
+#include <optional>
 #include <thread>
 #include <unordered_map>
 
@@ -23,18 +24,42 @@ constexpr size_t kMaxBackendEventsPerRefresh = 1024;
 constexpr uint32_t kBackendRetryCount = 3;
 constexpr std::chrono::milliseconds kBackendRetryBackoff{ 25 };
 
+[[nodiscard]] std::optional<std::string> readEnvVar(const char* key)
+{
+#if defined(_MSC_VER)
+    char* buffer = nullptr;
+    size_t size = 0;
+    const errno_t rc = _dupenv_s(&buffer, &size, key);
+    if (rc != 0 || buffer == nullptr || size == 0 || buffer[0] == '\0') {
+        if (buffer != nullptr) {
+            free(buffer);
+        }
+        return std::nullopt;
+    }
+
+    std::string value{ buffer };
+    free(buffer);
+    return value;
+#else
+    if (const char* value = std::getenv(key); value != nullptr && value[0] != '\0') {
+        return std::string{ value };
+    }
+    return std::nullopt;
+#endif
+}
+
 [[nodiscard]] std::string envOrDefault(const char* key, const char* fallback)
 {
-    if (const char* value = std::getenv(key); value != nullptr && value[0] != '\0') {
-        return value;
+    if (const auto value = readEnvVar(key); value.has_value()) {
+        return *value;
     }
     return fallback;
 }
 
 [[nodiscard]] bool envIsTrue(const char* key)
 {
-    if (const char* value = std::getenv(key); value != nullptr) {
-        const std::string v = value;
+    if (const auto value = readEnvVar(key); value.has_value()) {
+        const std::string& v = *value;
         return v == "1" || v == "true" || v == "TRUE" || v == "yes" || v == "on";
     }
     return false;
@@ -42,8 +67,8 @@ constexpr std::chrono::milliseconds kBackendRetryBackoff{ 25 };
 
 [[nodiscard]] bool envIsProductionMode()
 {
-    if (const char* value = std::getenv("RUNTIME_ASSET_MODE"); value != nullptr) {
-        const std::string v = value;
+    if (const auto value = readEnvVar("RUNTIME_ASSET_MODE"); value.has_value()) {
+        const std::string& v = *value;
         return v == "prod" || v == "production";
     }
     return false;
