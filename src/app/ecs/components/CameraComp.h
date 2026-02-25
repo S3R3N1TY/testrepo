@@ -15,7 +15,7 @@ struct CameraFrustum {
 
 struct CameraComp {
     std::array<float, 3> position{ 0.0F, 0.0F, 0.0F };
-    std::array<float, 3> forward{ 0.0F, 0.0F, 1.0F };
+    std::array<float, 3> forward{ 0.0F, 0.0F, -1.0F };
     std::array<float, 3> right{ 1.0F, 0.0F, 0.0F };
     std::array<float, 3> up{ 0.0F, 1.0F, 0.0F };
     float verticalFovRadians{ 1.0471975512F };
