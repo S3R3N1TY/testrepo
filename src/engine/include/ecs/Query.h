@@ -47,7 +47,7 @@ public:
 private:
     T* ptr_{ nullptr };
     World* world_{ nullptr };
-    Entity entity{};
+    Entity entity_{};
     uint32_t typeId_{ 0 };
     uint32_t archetypeId_{ 0 };
     uint32_t chunkIndex_{ 0 };
@@ -483,6 +483,8 @@ private:
     template <typename Fn, size_t... Is>
     void invokeEach(Fn&& fn,
         Entity entity,
+        uint32_t archetypeId,
+        uint32_t chunkIndex,
         const auto& chunk,
         uint32_t row,
         const std::array<size_t, sizeof...(Ts)>& columns,
@@ -490,7 +492,7 @@ private:
         const std::array<bool, sizeof...(Ts)>& present,
         std::index_sequence<Is...>)
     {
-        std::forward<Fn>(fn)(entity, argFrom<Ts>(entity, chunk, archetypeId, chunkIndex, row, columns[Is], sizes[Is], present[Is])...);
+        std::forward<Fn>(fn)(entity, argFrom<Ts>(chunk, row, columns[Is], sizes[Is], present[Is])...);
     }
 
     template <typename T>
