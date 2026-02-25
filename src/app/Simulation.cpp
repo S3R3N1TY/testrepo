@@ -198,7 +198,7 @@ void Simulation::configureScheduler()
 
             view.query<const PositionComp, CameraComp>().each([&](Entity, const PositionComp& pos, WriteRef<CameraComp> cam) {
                 cam.touch();
-                cam.get().position = { pos.x, pos.y, pos.z + 10.0F };
+                cam.get().position = { pos.x, pos.y, pos.z };
 
                 const auto F = normalize3(cam.get().forward);
                 const auto R = normalize3(cam.get().right);
