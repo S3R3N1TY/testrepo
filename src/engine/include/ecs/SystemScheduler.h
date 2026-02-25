@@ -30,6 +30,7 @@ public:
     void addPhaseDependency(Phase before, Phase after);
     void setDebugAccessValidation(bool enabled) { debugAccessValidation_ = enabled; }
 
+    void finalizeConfiguration();
     void run(Phase phase, World& world, const SimulationFrameInput& input) const;
     void validatePhaseGraph() const;
 
@@ -46,4 +47,5 @@ private:
     std::array<std::vector<ScheduledSystem>, static_cast<size_t>(Phase::Count)> phases_{};
     std::vector<std::pair<Phase, Phase>> phaseDependencies_{};
     bool debugAccessValidation_{ false };
+    bool finalized_{ false };
 };

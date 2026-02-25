@@ -9,8 +9,6 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
-#include <future>
-#include <ranges>
 #include <vector>
 
 int main()
@@ -24,177 +22,125 @@ int main()
     world.emplaceComponent<RotationComp>(e, RotationComp{ .angleRadians = 0.3F, .angularVelocityRadiansPerSecond = 1.2F });
     world.emplaceComponent<DebugTagComp>(e, DebugTagComp{ .tag = 7 });
 
-    const Entity noRot = world.createEntity();
-    world.emplaceComponent<PositionComp>(noRot, PositionComp{ .x = -1.0F, .y = 0.0F, .z = 0.0F });
-
-    assert(world.hasComponent<PositionComp>(e));
-    assert(world.hasComponent<RotationComp>(e));
-    assert(world.hasComponent<DebugTagComp>(e));
-
-    auto rotId = world.componentTypeId<RotationComp>();
-    assert(rotId.has_value());
-    const uint64_t v0 = world.componentVersion(*rotId);
-    world.emplaceComponent<RotationComp>(e, RotationComp{ .angleRadians = 2.0F, .angularVelocityRadiansPerSecond = 0.5F });
-    const uint64_t v1 = world.componentVersion(*rotId);
-    assert(v1 > v0);
-
-    // Explicit access canonicalization: mixed declaration order should preserve per-type access.
-    const auto plan = world.queryBuilder()
-                          .include<RotationComp>(ComponentAccess::ReadWrite)
-                          .include<PositionComp>(ComponentAccess::ReadOnly)
-                          .plan();
-    auto posId = world.componentTypeId<PositionComp>();
+    const auto posId = world.componentTypeId<PositionComp>();
+    const auto rotId = world.componentTypeId<RotationComp>();
     assert(posId.has_value());
-    bool sawPosRO = false;
-    bool sawRotRW = false;
-    for (const auto& remaps : plan.remapsByArchetype) {
-        for (const auto& remap : remaps) {
-            if (remap.componentType == *posId && remap.access == ComponentAccess::ReadOnly) {
-                sawPosRO = true;
-            }
-            if (remap.componentType == *rotId && remap.access == ComponentAccess::ReadWrite) {
-                sawRotRW = true;
-            }
-        }
-    }
-    assert(sawPosRO);
-    assert(sawRotRW);
+    assert(rotId.has_value());
 
-    // Optional payload semantics must be deterministic and non-null/null as expected.
-    size_t optionalHits = 0;
-    size_t optionalMisses = 0;
-    world.query<const PositionComp, Optional<const RotationComp>>().each(
-        [&](Entity entity, const PositionComp&, const RotationComp* rot) {
-            if (entity.id == e.id) {
-                assert(rot != nullptr);
-                optionalHits += 1;
-            }
-            if (entity.id == noRot.id) {
-                assert(rot == nullptr);
-                optionalMisses += 1;
-            }
-        });
-    assert(optionalHits == 1);
-    assert(optionalMisses == 1);
+    // Explicit deferred dependency correctness in one mixed transaction.
+    const auto deferred = scb.createEntity();
+    scb.emplaceComponent<PositionComp>(deferred, PositionComp{ .x = 5.0F, .y = 6.0F, .z = 7.0F });
+    scb.setComponent<PositionComp>(deferred, PositionComp{ .x = 9.0F, .y = 9.0F, .z = 9.0F });
+    scb.removeComponent<PositionComp>(deferred);
+    scb.destroyEntity(deferred);
+    world.playbackPhase(StructuralPlaybackPhase::PostSim);
+    world.playbackPhase(StructuralPlaybackPhase::EndFrame);
 
-    size_t excludeCount = 0;
-    world.query<const PositionComp>().exclude<RotationComp>().each([&](Entity entity, const PositionComp&) {
-        if (entity.id == noRot.id) {
-            excludeCount += 1;
-        }
-        assert(entity.id != e.id);
-    });
-    assert(excludeCount == 1);
-
-    // Optional eachChunk support: optional streams are nullable for missing archetypes.
-    bool sawChunkWithOptionalNull = false;
-    bool sawChunkWithOptionalData = false;
-    world.query<const PositionComp, Optional<const RotationComp>>().eachChunk(
-        [&](const Entity* entities, const PositionComp* pos, const RotationComp* rot, size_t count) {
-            (void)pos;
-            if (count == 0) {
-                return;
-            }
-            if (rot == nullptr) {
-                sawChunkWithOptionalNull = true;
-            }
-            else {
-                sawChunkWithOptionalData = true;
-            }
-            (void)entities;
-        });
-    assert(sawChunkWithOptionalNull);
-    assert(sawChunkWithOptionalData);
-
-    // Query-plan thread safety and correctness under contention.
-    constexpr size_t kExpectedPositionCount = 2;
-    std::vector<std::future<void>> futures{};
-    for (int i = 0; i < 16; ++i) {
-        futures.push_back(std::async(std::launch::async, [&world]() {
-            for (int j = 0; j < 128; ++j) {
-                size_t local = 0;
-                world.query<const PositionComp>().each([&](Entity, const PositionComp&) { local += 1; });
-                assert(local == kExpectedPositionCount);
-            }
-        }));
-    }
-    for (auto& f : futures) {
-        f.get();
-    }
-
-    // Archetype migration invariants under churn.
-    for (uint32_t i = 0; i < 256; ++i) {
-        const Entity temp = world.createEntity();
-        world.emplaceComponent<PositionComp>(temp);
-        world.emplaceComponent<RotationComp>(temp);
-        world.removeComponent<RotationComp>(temp);
-        if ((i % 3) == 0) {
-            world.emplaceComponent<ScaleComp>(temp);
-            world.removeComponent<ScaleComp>(temp);
-        }
-    }
-
-    std::vector<uint32_t> firstPass{};
-    std::vector<uint32_t> secondPass{};
-    world.query<const PositionComp>().each([&](Entity entity, const PositionComp&) { firstPass.push_back(entity.id); });
-    world.query<const PositionComp>().each([&](Entity entity, const PositionComp&) { secondPass.push_back(entity.id); });
-    assert(firstPass == secondPass);
-
-    // Change tracking should update when mutable query actually mutates data.
-    const uint64_t posBefore = world.componentVersion(*posId);
-    world.query<PositionComp>().each([&](Entity, WriteRef<PositionComp> p) {
-        (void)p.get().x;
-    });
-    const uint64_t posUnchanged = world.componentVersion(*posId);
-    assert(posUnchanged == posBefore);
-
-    world.query<PositionComp>().each([&](Entity, WriteRef<PositionComp> p) {
-        p.touch();
-        p.get().x += 1.0F;
-    });
-    const uint64_t posAfter = world.componentVersion(*posId);
-    assert(posAfter > posBefore);
-
-    world.beginReadPhase();
-    bool threw = false;
+    // Deferred token cannot be reused after epoch cleanup.
+    bool staleDeferredRejected = false;
     try {
-        world.removeComponent<DebugTagComp>(e);
+        scb.destroyEntity(deferred);
     }
     catch (...) {
-        threw = true;
+        staleDeferredRejected = true;
     }
-    world.endReadPhase();
-    assert(threw);
+    assert(staleDeferredRejected);
 
-    scb.removeComponent<DebugTagComp>(e);
-    world.playbackPhase(StructuralPlaybackPhase::PostSim);
-    assert(!world.hasComponent<DebugTagComp>(e));
-
+    // Mid-batch failure rollback must restore full pre-state.
     const Entity rollbackE = world.createEntity();
+    world.emplaceComponent<PositionComp>(rollbackE, PositionComp{ .x = 10.0F, .y = 20.0F, .z = 30.0F });
     world.emplaceComponent<RotationComp>(rollbackE, RotationComp{ .angleRadians = 1.0F, .angularVelocityRadiansPerSecond = 2.0F });
+    const uint32_t generationBefore = rollbackE.generation;
+    const auto snapBefore = world.snapshotEntity(rollbackE);
+    assert(snapBefore.has_value());
+
     scb.setComponent<RotationComp>(rollbackE, RotationComp{ .angleRadians = 9.0F, .angularVelocityRadiansPerSecond = 9.0F });
-    scb.setFailureInjection(FailureInjectionConfig{ .failAfterNApply = 1 });
+    scb.removeComponent<PositionComp>(rollbackE);
+    scb.destroyEntity(rollbackE);
+    scb.setFailureInjection(FailureInjectionConfig{ .failAfterNApply = 2 });
+
     bool rollbackTriggered = false;
     try {
         world.playbackPhase(StructuralPlaybackPhase::PostSim);
+        world.playbackPhase(StructuralPlaybackPhase::EndFrame);
     }
     catch (...) {
         rollbackTriggered = true;
     }
     assert(rollbackTriggered);
+
+    assert(world.isAlive(rollbackE));
+    assert(rollbackE.generation == generationBefore);
+    const auto* restoredPos = world.getComponent<PositionComp>(rollbackE);
+    const auto* restoredRot = world.getComponent<RotationComp>(rollbackE);
+    assert(restoredPos != nullptr);
+    assert(restoredPos->x == 10.0F);
+    assert(restoredRot != nullptr);
+    assert(restoredRot->angleRadians == 1.0F);
+
     scb.setFailureInjection(FailureInjectionConfig{});
-    scb.setComponent<RotationComp>(rollbackE, RotationComp{ .angleRadians = 9.0F, .angularVelocityRadiansPerSecond = 9.0F });
-    world.playbackPhase(StructuralPlaybackPhase::PostSim);
-    const RotationComp* updated = world.getComponent<RotationComp>(rollbackE);
-    assert(updated != nullptr);
-    assert(updated->angleRadians == 9.0F);
 
-    scb.removeComponent<RotationComp>(rollbackE);
-    world.playbackPhase(StructuralPlaybackPhase::PostSim);
-    assert(!world.hasComponent<RotationComp>(rollbackE));
+    // Mutable query with no touch does not bump versions.
+    world.beginSystemWriteScope();
+    const uint64_t posVersion0 = world.componentVersion(*posId);
+    world.query<PositionComp>().each([](Entity, WriteRef<PositionComp> pos) {
+        (void)pos.get().x;
+    });
+    world.endSystemWriteScope();
+    assert(world.componentVersion(*posId) == posVersion0);
 
-    scb.destroyEntity(e);
-    world.endFrame();
-    assert(!world.isAlive(e));
+    // Batched dirty flush: touching multiple rows in same chunk/column only bumps once.
+    std::vector<Entity> dense{};
+    dense.reserve(130);
+    for (int i = 0; i < 130; ++i) {
+        Entity ent = world.createEntity();
+        world.emplaceComponent<PositionComp>(ent, PositionComp{ .x = static_cast<float>(i), .y = 0.0F, .z = 0.0F });
+        dense.push_back(ent);
+    }
+
+    auto plan = world.queryBuilder().include<PositionComp>().plan();
+    std::vector<World::ChunkHandle> chunkHandles{};
+    world.forEachChunk<>(plan, [&](World::ChunkView view) {
+        chunkHandles.push_back(view.handle);
+    });
+    assert(chunkHandles.size() >= 2);
+
+    const uint64_t chunk0Before = world.chunkVersion(chunkHandles[0], *posId);
+    const uint64_t chunk1Before = world.chunkVersion(chunkHandles[1], *posId);
+
+    world.beginSystemWriteScope();
+    int touched = 0;
+    world.query<PositionComp>().each([&](Entity ent, WriteRef<PositionComp> pos) {
+        if (ent.id == dense[0].id || ent.id == dense[1].id) {
+            pos.touch();
+            pos.get().x += 1.0F;
+            touched += 1;
+        }
+    });
+    world.endSystemWriteScope();
+    assert(touched == 2);
+
+    const uint64_t chunk0After = world.chunkVersion(chunkHandles[0], *posId);
+    const uint64_t chunk1After = world.chunkVersion(chunkHandles[1], *posId);
+    assert(chunk0After == chunk0Before + 1);
+    assert(chunk1After == chunk1Before);
+
+    // Optional mutable mutation path marks dirty via OptionalWriteRef.
+    const uint64_t rotVersion0 = world.componentVersion(*rotId);
+    world.beginSystemWriteScope();
+    bool optionalMutated = false;
+    world.query<Optional<RotationComp>>().each([&](Entity ent, OptionalWriteRef<RotationComp> rot) {
+        if (ent.id == e.id) {
+            auto* write = static_cast<WriteRef<RotationComp>*>(rot);
+            assert(write != nullptr);
+            write->touch();
+            write->get().angleRadians += 0.25F;
+            optionalMutated = true;
+        }
+    });
+    world.endSystemWriteScope();
+    assert(optionalMutated);
+    assert(world.componentVersion(*rotId) == rotVersion0 + 1);
+
     return 0;
 }

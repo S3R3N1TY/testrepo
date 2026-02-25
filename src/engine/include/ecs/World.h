@@ -711,6 +711,18 @@ private:
     void markComponentDirtyByEntity(Entity entity, ComponentTypeId typeId);
 
 public:
+    void markComponentDirty(Entity entity, uint32_t typeId, uint32_t archetypeId = kInvalidArchetype, uint32_t chunkIndex = kInvalidChunk, uint32_t row = 0)
+    {
+        if (typeId == 0) {
+            return;
+        }
+        if (archetypeId != kInvalidArchetype && chunkIndex != kInvalidChunk) {
+            markChunkComponentDirty(archetypeId, chunkIndex, typeId, row);
+            return;
+        }
+        markComponentDirtyByEntity(entity, typeId);
+    }
+
     [[nodiscard]] uint64_t chunkVersion(ChunkHandle handle, uint32_t componentType) const;
     [[nodiscard]] uint64_t chunkStructuralVersion(ChunkHandle handle) const;
     [[nodiscard]] uint64_t chunkDirtyEpoch(ChunkHandle handle, uint32_t componentType) const;
@@ -747,6 +759,7 @@ public:
     bool mutationEnabled_{ true };
     uint64_t frameEpoch_{ 1 };
     std::unordered_set<uint64_t> pendingDirtyVersionBumps_{};
+    uint32_t writeScopeDepth_{ 0 };
 
 
     template <typename... Ts>

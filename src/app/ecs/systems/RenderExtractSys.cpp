@@ -6,9 +6,24 @@
 #include "../components/VisibilityComp.h"
 
 #include <algorithm>
-#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
-namespace {}
+namespace {
+bool drawLess(const DrawPacket& a, const DrawPacket& b)
+{
+    if (a.materialId != b.materialId) {
+        return a.materialId < b.materialId;
+    }
+    if (a.viewId != b.viewId) {
+        return a.viewId < b.viewId;
+    }
+    if (a.angleRadians != b.angleRadians) {
+        return a.angleRadians < b.angleRadians;
+    }
+    return a.worldEntityId < b.worldEntityId;
+}
+}
 
 FrameGraphInput RenderExtractSys::build(const World& world) const
 {
@@ -30,17 +45,17 @@ FrameGraphInput RenderExtractSys::build(const World& world) const
     const auto visType = world.componentTypeId<VisibilityComp>();
     const auto l2wType = world.componentTypeId<LocalToWorldComp>();
 
-    std::unordered_map<uint32_t, RenderViewPacket> viewMap{};
-    std::unordered_map<ChunkKey, bool, ChunkKeyHash> seen{};
+    std::vector<ChunkKey> seenKeys{};
+    std::vector<std::pair<ChunkKey, const CachedChunkOutput*>> orderedCacheSlices{};
 
     world.forEachChunk<>(plan, [&](World::ChunkView view) {
         const ChunkKey key{ view.handle.archetypeId, view.handle.chunkIndex };
-        seen[key] = true;
+        seenKeys.push_back(key);
         ChunkExtractStamp stamp{
             .rotChunkVersion = world.chunkVersion(view.handle, *rotType),
             .visChunkVersion = world.chunkVersion(view.handle, *visType),
             .l2wChunkVersion = world.chunkVersion(view.handle, *l2wType),
-             .renderChunkVersion = world.chunkVersion(view.handle, *renderType),
+            .renderChunkVersion = world.chunkVersion(view.handle, *renderType),
             .visDirtyEpoch = world.chunkDirtyEpoch(view.handle, *visType),
             .l2wDirtyEpoch = world.chunkDirtyEpoch(view.handle, *l2wType),
             .structuralVersion = world.chunkStructuralVersion(view.handle)
@@ -75,55 +90,50 @@ FrameGraphInput RenderExtractSys::build(const World& world) const
                 });
             }
 
-            std::ranges::stable_sort(rebuilt.draws, [](const DrawPacket& a, const DrawPacket& b) {
-                if (a.materialId != b.materialId) {
-                    return a.materialId < b.materialId;
-                }
-                return a.worldEntityId < b.worldEntityId;
-            });
-            uint32_t first = 0;
-            for (uint32_t i = 1; i <= rebuilt.draws.size(); ++i) {
-                if (i == rebuilt.draws.size() || rebuilt.draws[i].materialId != rebuilt.draws[first].materialId) {
-                    rebuilt.localMaterialBatches.push_back(MaterialBatchPacket{ rebuilt.draws[first].materialId, first, i - first });
-                    first = i;
-                }
-            }
+            std::ranges::stable_sort(rebuilt.draws, drawLess);
             it = chunkCache_.insert_or_assign(key, std::move(rebuilt)).first;
         }
         else {
             lastReusedChunkCount_ += 1;
         }
 
-        for (const auto& v : it->second.views) {
-            viewMap.insert_or_assign(v.viewId, v);
-        }
-        const uint32_t drawBase = static_cast<uint32_t>(output.drawPackets.size());
-        output.drawPackets.insert(output.drawPackets.end(), it->second.draws.begin(), it->second.draws.end());
-        for (const MaterialBatchPacket& local : it->second.localMaterialBatches) {
-            output.materialBatches.push_back(MaterialBatchPacket{
-                .materialId = local.materialId,
-                .firstDrawPacket = drawBase + local.firstDrawPacket,
-                .drawPacketCount = local.drawPacketCount
-            });
-        }
+        orderedCacheSlices.push_back({ key, &it->second });
     });
 
-    std::erase_if(chunkCache_, [&](const auto& kv) { return !seen.contains(kv.first); });
+    std::ranges::sort(seenKeys, [](const ChunkKey& a, const ChunkKey& b) {
+        if (a.archetypeId != b.archetypeId) {
+            return a.archetypeId < b.archetypeId;
+        }
+        return a.chunkIndex < b.chunkIndex;
+    });
+    seenKeys.erase(std::unique(seenKeys.begin(), seenKeys.end()), seenKeys.end());
 
-    for (const auto& [_, view] : viewMap) {
-        output.views.push_back(view);
+    std::unordered_set<ChunkKey, ChunkKeyHash> seenSet{};
+    for (const ChunkKey& key : seenKeys) {
+        seenSet.insert(key);
     }
-    std::ranges::sort(output.views, {}, &RenderViewPacket::viewId);
+    std::erase_if(chunkCache_, [&](const auto& kv) { return !seenSet.contains(kv.first); });
 
-    std::ranges::stable_sort(output.drawPackets, [](const DrawPacket& a, const DrawPacket& b) {
-        if (a.materialId != b.materialId) {
-            return a.materialId < b.materialId;
+    std::ranges::sort(orderedCacheSlices, [](const auto& a, const auto& b) {
+        if (a.first.archetypeId != b.first.archetypeId) {
+            return a.first.archetypeId < b.first.archetypeId;
         }
-        if (a.viewId != b.viewId) {
-            return a.viewId < b.viewId;
-        }
-        return a.worldEntityId < b.worldEntityId;
+        return a.first.chunkIndex < b.first.chunkIndex;
     });
+
+    for (const auto& [_, cached] : orderedCacheSlices) {
+        output.drawPackets.insert(output.drawPackets.end(), cached->draws.begin(), cached->draws.end());
+        output.views.insert(output.views.end(), cached->views.begin(), cached->views.end());
+    }
+
+    std::ranges::sort(output.views, [](const RenderViewPacket& a, const RenderViewPacket& b) {
+        return a.viewId < b.viewId;
+    });
+    output.views.erase(std::unique(output.views.begin(), output.views.end(), [](const RenderViewPacket& a, const RenderViewPacket& b) {
+        return a.viewId == b.viewId;
+    }), output.views.end());
+
+    std::ranges::stable_sort(output.drawPackets, drawLess);
 
     output.materialBatches.clear();
     if (!output.drawPackets.empty()) {
