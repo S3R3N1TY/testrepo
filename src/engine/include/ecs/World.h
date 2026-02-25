@@ -277,6 +277,26 @@ public:
         }
     }
 
+    template <typename... Ts, typename Fn>
+    void forEachChunk(const QueryPlan& plan, Fn&& fn) const
+    {
+        for (size_t planIndex = 0; planIndex < plan.matchingArchetypes.size(); ++planIndex) {
+            const uint32_t archetypeId = plan.matchingArchetypes[planIndex];
+            const Archetype& arch = archetypes_[archetypeId];
+            for (uint32_t chunkIndex = 0; chunkIndex < arch.chunks.size(); ++chunkIndex) {
+                const Chunk& chunk = arch.chunks[chunkIndex];
+                if (chunk.count == 0) {
+                    continue;
+                }
+                fn(ChunkView{
+                    .handle = ChunkHandle{ .archetypeId = archetypeId, .chunkIndex = chunkIndex },
+                    .entities = chunk.entities.data(),
+                    .count = chunk.count
+                });
+            }
+        }
+    }
+
     void beginFrame();
     void playbackPhase(StructuralPlaybackPhase phase);
     void endFrame();
