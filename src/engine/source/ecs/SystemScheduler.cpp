@@ -9,6 +9,9 @@
 
 void SystemScheduler::addRead(Phase phase, AccessDeclaration access, ReadUpdateFn fn)
 {
+    if (finalized_) {
+        throw std::runtime_error("SystemScheduler configuration is finalized");
+    }
     phases_[static_cast<size_t>(phase)].push_back(ScheduledSystem{
         .access = std::move(access),
         .readFn = std::move(fn),
@@ -19,6 +22,9 @@ void SystemScheduler::addRead(Phase phase, AccessDeclaration access, ReadUpdateF
 
 void SystemScheduler::addWrite(Phase phase, AccessDeclaration access, WriteUpdateFn fn)
 {
+    if (finalized_) {
+        throw std::runtime_error("SystemScheduler configuration is finalized");
+    }
     phases_[static_cast<size_t>(phase)].push_back(ScheduledSystem{
         .access = std::move(access),
         .readFn = {},
@@ -29,8 +35,17 @@ void SystemScheduler::addWrite(Phase phase, AccessDeclaration access, WriteUpdat
 
 void SystemScheduler::addPhaseDependency(Phase before, Phase after)
 {
+    if (finalized_) {
+        throw std::runtime_error("SystemScheduler configuration is finalized");
+    }
     phaseDependencies_.push_back({ before, after });
     validatePhaseGraph();
+}
+
+void SystemScheduler::finalizeConfiguration()
+{
+    validatePhaseGraph();
+    finalized_ = true;
 }
 
 void SystemScheduler::validatePhaseGraph() const
@@ -81,6 +96,11 @@ bool SystemScheduler::hasConflict(const AccessDeclaration& lhs, const AccessDecl
 
 void SystemScheduler::run(Phase phase, World& world, const SimulationFrameInput& input) const
 {
+#ifndef NDEBUG
+    if (!finalized_) {
+        throw std::runtime_error("SystemScheduler::run called before finalizeConfiguration");
+    }
+#endif
     const auto& list = phases_[static_cast<size_t>(phase)];
     if (list.empty()) {
         if (phase == Phase::PostSim) {
@@ -129,8 +149,9 @@ void SystemScheduler::run(Phase phase, World& world, const SimulationFrameInput&
             std::vector<std::future<void>> futures{};
             futures.reserve(level.size());
             for (size_t idx : level) {
-                futures.push_back(std::async(std::launch::async, [&world, &input, &list, idx]() {
-                    WorldReadView readView{ world, debugAccessValidation_ ? &list[idx].access : nullptr };
+                const bool debugValidation = debugAccessValidation_;
+                futures.push_back(std::async(std::launch::async, [&world, &input, &list, idx, debugValidation]() {
+                    WorldReadView readView{ world, debugValidation ? &list[idx].access : nullptr };
                     list[idx].readFn(readView, input);
                 }));
             }

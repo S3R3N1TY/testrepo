@@ -29,6 +29,7 @@ Simulation::Simulation()
     scheduler_.addPhaseDependency(SystemScheduler::Phase::PostSim, SystemScheduler::Phase::RenderExtract);
     createInitialScene();
     configureScheduler();
+    scheduler_.finalizeConfiguration();
 }
 
 void Simulation::configureScheduler()
@@ -156,9 +157,51 @@ void Simulation::configureScheduler()
     }
     scheduler_.addWrite(SystemScheduler::Phase::PostSim, std::move(cameraAccess),
         [](WorldWriteView& view, const SimulationFrameInput&) {
-            view.query<const PositionComp, CameraComp>().each([](Entity, const PositionComp& pos, WriteRef<CameraComp> cam) {
+            auto dot3 = [](const std::array<float, 3>& a, const std::array<float, 3>& b) {
+                return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+            };
+            auto add3 = [](const std::array<float, 3>& a, const std::array<float, 3>& b) {
+                return std::array<float, 3>{ a[0] + b[0], a[1] + b[1], a[2] + b[2] };
+            };
+            auto scale3 = [](const std::array<float, 3>& v, float s) {
+                return std::array<float, 3>{ v[0] * s, v[1] * s, v[2] * s };
+            };
+            auto normalize3 = [](const std::array<float, 3>& v) {
+                const float len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+                const float inv = (len > 1e-6F) ? (1.0F / len) : 1.0F;
+                return std::array<float, 3>{ v[0] * inv, v[1] * inv, v[2] * inv };
+            };
+            auto makePlane = [&](const std::array<float, 3>& n, const std::array<float, 3>& point) {
+                FrustumPlane p{};
+                p.normal = normalize3(n);
+                p.d = -dot3(p.normal, point);
+                return p;
+            };
+
+            view.query<const PositionComp, CameraComp>().each([&](Entity, const PositionComp& pos, WriteRef<CameraComp> cam) {
                 cam.touch();
                 cam.get().position = { pos.x, pos.y, pos.z + 10.0F };
+
+                const auto F = normalize3(cam.get().forward);
+                const auto R = normalize3(cam.get().right);
+                const auto U = normalize3(cam.get().up);
+                const float tanHalfY = std::tan(cam.get().verticalFovRadians * 0.5F);
+                const float tanHalfX = tanHalfY * cam.get().aspectRatio;
+
+                const auto leftN = normalize3(add3(scale3(R, 1.0F), scale3(F, tanHalfX)));
+                const auto rightN = normalize3(add3(scale3(R, -1.0F), scale3(F, tanHalfX)));
+                const auto bottomN = normalize3(add3(scale3(U, 1.0F), scale3(F, tanHalfY)));
+                const auto topN = normalize3(add3(scale3(U, -1.0F), scale3(F, tanHalfY)));
+
+                const auto nearPoint = add3(cam.get().position, scale3(F, cam.get().zNear));
+                const auto farPoint = add3(cam.get().position, scale3(F, cam.get().zFar));
+
+                cam.get().frustum.planes[0] = makePlane(F, nearPoint);
+                cam.get().frustum.planes[1] = makePlane(scale3(F, -1.0F), farPoint);
+                cam.get().frustum.planes[2] = makePlane(leftN, cam.get().position);
+                cam.get().frustum.planes[3] = makePlane(rightN, cam.get().position);
+                cam.get().frustum.planes[4] = makePlane(topN, cam.get().position);
+                cam.get().frustum.planes[5] = makePlane(bottomN, cam.get().position);
             });
         });
 
@@ -203,51 +246,21 @@ void Simulation::configureScheduler()
                 return;
             }
 
+            auto sphereInFrustum = [&](const WorldBoundsComp& b) {
+                for (const FrustumPlane& plane : camera.frustum.planes) {
+                    const float distance = (plane.normal[0] * b.center[0])
+                        + (plane.normal[1] * b.center[1])
+                        + (plane.normal[2] * b.center[2])
+                        + plane.d;
+                    if (distance < -b.radius) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+
             view.query<const WorldBoundsComp, VisibilityComp>().eachChunk(
                 [&](const Entity* entities, const WorldBoundsComp* bounds, VisibilityComp* visRaw, size_t count) {
-                    auto dot3 = [](const std::array<float,3>& a, const std::array<float,3>& b) {
-                        return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
-                    };
-                    auto sub3 = [](const std::array<float,3>& a, const std::array<float,3>& b) {
-                        return std::array<float,3>{ a[0]-b[0], a[1]-b[1], a[2]-b[2] };
-                    };
-                    auto normalize3 = [](const std::array<float,3>& v) {
-                        const float len = std::sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
-                        const float inv = (len > 1e-6F) ? (1.0F / len) : 1.0F;
-                        return std::array<float,3>{ v[0]*inv, v[1]*inv, v[2]*inv };
-                    };
-                    auto add3 = [](const std::array<float,3>& a, const std::array<float,3>& b) {
-                        return std::array<float,3>{ a[0]+b[0], a[1]+b[1], a[2]+b[2] };
-                    };
-                    auto scale3 = [](const std::array<float,3>& v, float s) {
-                        return std::array<float,3>{ v[0]*s, v[1]*s, v[2]*s };
-                    };
-
-                    const std::array<float,3> F = normalize3(camera.forward);
-                    const std::array<float,3> R = normalize3(camera.right);
-                    const std::array<float,3> U = normalize3(camera.up);
-                    const float tanHalf = std::tan(camera.verticalFovRadians * 0.5F);
-                    const float tanHalfX = tanHalf * camera.aspectRatio;
-
-                    const auto leftN = normalize3(add3(scale3(R, 1.0F), scale3(F, tanHalfX)));
-                    const auto rightN = normalize3(add3(scale3(R, -1.0F), scale3(F, tanHalfX)));
-                    const auto bottomN = normalize3(add3(scale3(U, 1.0F), scale3(F, tanHalf)));
-                    const auto topN = normalize3(add3(scale3(U, -1.0F), scale3(F, tanHalf)));
-
-                    auto sphereInFrustum = [&](const WorldBoundsComp& b) {
-                        const std::array<float,3> center = b.center;
-                        const std::array<float,3> rel = sub3(center, camera.position);
-                        const float depth = dot3(rel, F);
-                        if (depth + b.radius < camera.zNear || depth - b.radius > camera.zFar) {
-                            return false;
-                        }
-                        if (dot3(rel, leftN) < -b.radius) return false;
-                        if (dot3(rel, rightN) < -b.radius) return false;
-                        if (dot3(rel, topN) < -b.radius) return false;
-                        if (dot3(rel, bottomN) < -b.radius) return false;
-                        return true;
-                    };
-
                     bool coarseVisible = false;
                     for (size_t i = 0; i < count; ++i) {
                         if (sphereInFrustum(bounds[i])) {
@@ -255,10 +268,13 @@ void Simulation::configureScheduler()
                             break;
                         }
                     }
+
                     for (size_t i = 0; i < count; ++i) {
                         const bool visible = coarseVisible && sphereInFrustum(bounds[i]);
-                        visRaw[i].visible = visible;
-                        view.markModified<VisibilityComp>(entities[i]);
+                        if (visRaw[i].visible != visible) {
+                            visRaw[i].visible = visible;
+                            view.markModified<VisibilityComp>(entities[i]);
+                        }
                     }
                 });
         });

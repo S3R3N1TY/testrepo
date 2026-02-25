@@ -485,11 +485,23 @@ void World::endFrame()
 
 void World::beginSystemWriteScope()
 {
-    pendingDirtyVersionBumps_.clear();
+    if (writeScopeDepth_ == 0) {
+        pendingDirtyVersionBumps_.clear();
+    }
+    writeScopeDepth_ += 1;
 }
 
 void World::endSystemWriteScope()
 {
+    if (writeScopeDepth_ == 0) {
+        return;
+    }
+
+    writeScopeDepth_ -= 1;
+    if (writeScopeDepth_ != 0) {
+        return;
+    }
+
     for (uint64_t key : pendingDirtyVersionBumps_) {
         const uint32_t archetypeId = static_cast<uint32_t>((key >> 40u) & 0xFFFFFu);
         const uint32_t chunkIndex = static_cast<uint32_t>((key >> 20u) & 0xFFFFFu);
@@ -588,10 +600,8 @@ void World::markChunkComponentDirty(uint32_t archetypeId, uint32_t chunkIndex, C
         chunk.rowDirtyEpochByColumn[colIt->second][row] = frameEpoch_;
     }
 
-    if (chunk.chunkDirtyEpochByColumn[colIt->second] != frameEpoch_) {
-        chunk.chunkDirtyEpochByColumn[colIt->second] = frameEpoch_;
-        pendingDirtyVersionBumps_.insert(dirtyKey(archetypeId, chunkIndex, typeId));
-    }
+    chunk.chunkDirtyEpochByColumn[colIt->second] = frameEpoch_;
+    pendingDirtyVersionBumps_.insert(dirtyKey(archetypeId, chunkIndex, typeId));
 }
 
 void World::markComponentDirtyByEntity(Entity entity, ComponentTypeId typeId)

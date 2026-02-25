@@ -60,12 +60,21 @@ public:
 
     DeferredEntityHandle createEntity(StructuralPlaybackPhase phase = StructuralPlaybackPhase::PostSim)
     {
+        std::scoped_lock lock(mutex_);
+
         const uint64_t token = nextDeferredToken_++;
         auto created = std::make_shared<std::optional<Entity>>();
-        const uint64_t entryId = nextEntryId_;
-        deferredByToken_.insert_or_assign(token, DeferredRecord{ .createEntryId = entryId, .resolved = created });
+        const uint64_t createEntryId = nextEntryId_;
 
-        enqueue(makeEntry(JournalOpType::CreateEntity, phase,
+        deferredByToken_.insert_or_assign(token, DeferredRecord{
+            .createEntryId = createEntryId,
+            .resolved = created,
+            .pendingEntries = 0
+        });
+
+        const uint32_t key = deferredKey(token);
+        enqueueLocked(makeEntryLocked(JournalOpType::CreateEntity,
+            phase,
             [](World&) { return true; },
             [created](World& world) {
                 *created = world.createEntity();
@@ -75,7 +84,8 @@ public:
                     world.destroyEntity(**created);
                 }
             },
-            dependenciesForKey(deferredKey(token))));
+            dependenciesForKeyLocked(key),
+            token));
 
         return DeferredEntityHandle{ .token = token };
     }
@@ -101,11 +111,27 @@ public:
         if (entries.empty()) {
             return;
         }
-        Transaction tx{ std::move(entries) };
+
+        Transaction tx{ entries };
         tx.execute(world, failureInjection_ ? &*failureInjection_ : nullptr);
 
+        std::scoped_lock lock(mutex_);
+        for (const JournalEntry& entry : entries) {
+            const auto tokenIt = entryToDeferredToken_.find(entry.id);
+            if (tokenIt == entryToDeferredToken_.end()) {
+                continue;
+            }
+            const uint64_t token = tokenIt->second;
+            entryToDeferredToken_.erase(tokenIt);
+            if (auto deferredIt = deferredByToken_.find(token); deferredIt != deferredByToken_.end()) {
+                if (deferredIt->second.pendingEntries > 0) {
+                    deferredIt->second.pendingEntries -= 1;
+                }
+            }
+        }
+
         if (phase == StructuralPlaybackPhase::PostSim || phase == StructuralPlaybackPhase::EndFrame) {
-            sweepResolvedDeferred();
+            sweepResolvedDeferredLocked();
         }
     }
 
@@ -129,6 +155,7 @@ private:
     struct DeferredRecord {
         uint64_t createEntryId{ 0 };
         std::shared_ptr<std::optional<Entity>> resolved{};
+        uint64_t pendingEntries{ 0 };
     };
 
     struct ResolvedEntity {
@@ -136,6 +163,7 @@ private:
         std::shared_ptr<std::optional<Entity>> resolved{};
         uint32_t dependencyKey{ 0 };
         uint64_t createEntryId{ 0 };
+        uint64_t deferredToken{ 0 };
 
         [[nodiscard]] Entity require() const
         {
@@ -162,16 +190,29 @@ private:
 
     ResolvedEntity resolveEntity(Entity entity)
     {
-        return ResolvedEntity{ .direct = entity, .resolved = {}, .dependencyKey = entity.id, .createEntryId = 0 };
+        return ResolvedEntity{
+            .direct = entity,
+            .resolved = {},
+            .dependencyKey = entity.id,
+            .createEntryId = 0,
+            .deferredToken = 0
+        };
     }
 
     ResolvedEntity resolveDeferred(DeferredEntityHandle handle)
     {
+        std::scoped_lock lock(mutex_);
         const auto it = deferredByToken_.find(handle.token);
-        if (it == deferredByToken_.end()) {
-            throw std::runtime_error("Unknown deferred entity handle");
+        if (it == deferredByToken_.end() || it->second.createEntryId == 0) {
+            throw std::runtime_error("Unknown deferred entity handle in current command buffer epoch");
         }
-        return ResolvedEntity{ .direct = {}, .resolved = it->second.resolved, .dependencyKey = deferredKey(handle.token), .createEntryId = it->second.createEntryId };
+        return ResolvedEntity{
+            .direct = {},
+            .resolved = it->second.resolved,
+            .dependencyKey = deferredKey(handle.token),
+            .createEntryId = it->second.createEntryId,
+            .deferredToken = handle.token
+        };
     }
 
     template <typename T, typename... Args>
@@ -179,7 +220,9 @@ private:
     {
         static_assert(std::is_copy_constructible_v<T>, "Structural transactional commands require copy-constructible component types");
         auto state = std::make_shared<std::optional<T>>();
-        enqueue(makeEntry(opType, StructuralPlaybackPhase::PostSim,
+        std::scoped_lock lock(mutex_);
+        enqueueLocked(makeEntryLocked(opType,
+            StructuralPlaybackPhase::PostSim,
             [resolved](World& world) { return resolved.exists(world); },
             [=, tup = std::make_tuple(std::forward<Args>(args)...)](World& world) mutable {
                 const Entity target = resolved.require();
@@ -199,7 +242,8 @@ private:
                     world.template removeComponent<T>(target);
                 }
             },
-            dependenciesForResolved(resolved)));
+            dependenciesForResolvedLocked(resolved),
+            resolved.deferredToken));
     }
 
     template <typename T>
@@ -207,7 +251,9 @@ private:
     {
         static_assert(std::is_copy_constructible_v<T>, "Structural transactional commands require copy-constructible component types");
         auto state = std::make_shared<std::optional<T>>();
-        enqueue(makeEntry(JournalOpType::RemoveComponent, StructuralPlaybackPhase::PostSim,
+        std::scoped_lock lock(mutex_);
+        enqueueLocked(makeEntryLocked(JournalOpType::RemoveComponent,
+            StructuralPlaybackPhase::PostSim,
             [resolved](World& world) { return resolved.exists(world); },
             [=](World& world) mutable {
                 const Entity target = resolved.require();
@@ -222,13 +268,16 @@ private:
                     world.template emplaceComponent<T>(target, **state);
                 }
             },
-            dependenciesForResolved(resolved)));
+            dependenciesForResolvedLocked(resolved),
+            resolved.deferredToken));
     }
 
     void enqueueDestroy(const ResolvedEntity& resolved)
     {
         auto snapshot = std::make_shared<std::optional<World::EntitySnapshot>>();
-        enqueue(makeEntry(JournalOpType::DestroyEntity, StructuralPlaybackPhase::EndFrame,
+        std::scoped_lock lock(mutex_);
+        enqueueLocked(makeEntryLocked(JournalOpType::DestroyEntity,
+            StructuralPlaybackPhase::EndFrame,
             [resolved](World& world) { return resolved.exists(world); },
             [=](World& world) {
                 const Entity target = resolved.require();
@@ -242,15 +291,17 @@ private:
                     world.restoreEntity(**snapshot);
                 }
             },
-            dependenciesForResolved(resolved)));
+            dependenciesForResolvedLocked(resolved),
+            resolved.deferredToken));
     }
 
-    JournalEntry makeEntry(JournalOpType type,
+    JournalEntry makeEntryLocked(JournalOpType type,
         StructuralPlaybackPhase phase,
         std::function<bool(World&)> validate,
         std::function<void(World&)> apply,
         std::function<void(World&)> undo,
-        std::vector<uint64_t> dependsOn = {})
+        std::vector<uint64_t> dependsOn = {},
+        uint64_t deferredToken = 0)
     {
         JournalEntry entry{};
         entry.id = nextEntryId_++;
@@ -260,19 +311,29 @@ private:
         entry.validate = std::move(validate);
         entry.apply = std::move(apply);
         entry.undo = std::move(undo);
+
+        if (deferredToken != 0) {
+            auto it = deferredByToken_.find(deferredToken);
+            if (it == deferredByToken_.end() || it->second.createEntryId == 0) {
+                throw std::runtime_error("Deferred token has no create entry in this command buffer epoch");
+            }
+            entryToDeferredToken_.insert_or_assign(entry.id, deferredToken);
+            it->second.pendingEntries += 1;
+        }
+
         return entry;
     }
 
-    std::vector<uint64_t> dependenciesForResolved(const ResolvedEntity& resolved)
+    std::vector<uint64_t> dependenciesForResolvedLocked(const ResolvedEntity& resolved)
     {
-        std::vector<uint64_t> deps = dependenciesForKey(resolved.dependencyKey);
+        std::vector<uint64_t> deps = dependenciesForKeyLocked(resolved.dependencyKey);
         if (resolved.createEntryId != 0) {
             deps.push_back(resolved.createEntryId);
         }
         return deps;
     }
 
-    std::vector<uint64_t> dependenciesForKey(uint32_t key)
+    std::vector<uint64_t> dependenciesForKeyLocked(uint32_t key)
     {
         std::vector<uint64_t> deps{};
         if (const auto it = lastEntryByKey_.find(key); it != lastEntryByKey_.end()) {
@@ -282,16 +343,24 @@ private:
         return deps;
     }
 
-    void sweepResolvedDeferred()
+    void sweepResolvedDeferredLocked()
     {
-        std::erase_if(deferredByToken_, [](const auto& pair) {
-            return pair.second.resolved->has_value();
-        });
+        std::vector<uint64_t> toErase{};
+        toErase.reserve(deferredByToken_.size());
+        for (const auto& [token, record] : deferredByToken_) {
+            if (record.resolved->has_value() && record.pendingEntries == 0) {
+                toErase.push_back(token);
+            }
+        }
+
+        for (uint64_t token : toErase) {
+            lastEntryByKey_.erase(deferredKey(token));
+            deferredByToken_.erase(token);
+        }
     }
 
-    void enqueue(JournalEntry entry)
+    void enqueueLocked(JournalEntry entry)
     {
-        std::scoped_lock lock(mutex_);
         entriesByPhase_[static_cast<size_t>(entry.phase)].push_back(std::move(entry));
     }
 
@@ -302,4 +371,5 @@ private:
     std::optional<FailureInjectionConfig> failureInjection_{};
     std::unordered_map<uint32_t, uint64_t> lastEntryByKey_{};
     std::unordered_map<uint64_t, DeferredRecord> deferredByToken_{};
+    std::unordered_map<uint64_t, uint64_t> entryToDeferredToken_{};
 };

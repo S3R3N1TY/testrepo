@@ -40,7 +40,6 @@ private:
         ChunkExtractStamp stamp{};
         std::vector<RenderViewPacket> views{};
         std::vector<DrawPacket> draws{};
-        std::vector<MaterialBatchPacket> localMaterialBatches{};
     };
 
     mutable std::unordered_map<ChunkKey, CachedChunkOutput, ChunkKeyHash> chunkCache_{};

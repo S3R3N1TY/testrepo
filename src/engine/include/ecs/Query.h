@@ -19,8 +19,8 @@ template <typename T>
 class WriteRef {
 public:
     WriteRef() = default;
-    WriteRef(T* ptr, World* world, Entity entity, uint32_t typeId)
-        : ptr_(ptr), world_(world), entity_(entity), typeId_(typeId)
+    WriteRef(T* ptr, World* world, Entity entity, uint32_t typeId, uint32_t archetypeId, uint32_t chunkIndex, uint32_t row)
+        : ptr_(ptr), world_(world), entity_(entity), typeId_(typeId), archetypeId_(archetypeId), chunkIndex_(chunkIndex), row_(row)
     {
     }
 
@@ -40,7 +40,7 @@ public:
     void touch()
     {
         if (world_ != nullptr) {
-            world_->markModified<T>(entity_);
+            world_->markComponentDirty(entity_, typeId_, archetypeId_, chunkIndex_, row_);
         }
     }
 
@@ -49,8 +49,10 @@ private:
     World* world_{ nullptr };
     Entity entity{};
     uint32_t typeId_{ 0 };
+    uint32_t archetypeId_{ 0 };
+    uint32_t chunkIndex_{ 0 };
+    uint32_t row_{ 0 };
 };
-
 
 template <typename T>
 class OptionalWriteRef {
@@ -124,7 +126,7 @@ public:
                 auto& chunk = archetype.chunks[chunkIndex];
                 for (uint32_t row = 0; row < chunk.count; ++row) {
                     const Entity entity = chunk.entities[row];
-                    invokeEach(std::forward<Fn>(fn), entity, chunk, row, columns, sizes, present, std::index_sequence_for<Ts...>{});
+                    invokeEach(std::forward<Fn>(fn), entity, archetypeId, chunkIndex, chunk, row, columns, sizes, present, std::index_sequence_for<Ts...>{});
                 }
             }
         }
@@ -237,20 +239,20 @@ private:
     }
 
     template <typename T>
-    decltype(auto) argFrom(Entity entity, auto& chunk, uint32_t row, size_t column, size_t size, bool present)
+    decltype(auto) argFrom(Entity entity, auto& chunk, uint32_t archetypeId, uint32_t chunkIndex, uint32_t row, size_t column, size_t size, bool present)
     {
         using Raw = std::remove_cvref_t<T>;
         using Store = QueryStorage<Raw>;
         if constexpr (QueryArg<Raw>::kOptional) {
             if (!present) {
-                return static_cast<QueryPointer<Raw>>(nullptr);
+                return OptionalWriteRef<Store>{};
             }
             if constexpr (QueryArg<Raw>::kConst) {
                 return reinterpret_cast<const Store*>(World::componentPtr(chunk, column, row, size));
             }
             else {
                 auto* ptr = reinterpret_cast<Store*>(World::componentPtr(chunk, column, row, size));
-                return OptionalWriteRef<Store>{ WriteRef<Store>{ ptr, &world_, entity, world_.template componentTypeId<Store>().value_or(0) } };
+                return OptionalWriteRef<Store>{ WriteRef<Store>{ ptr, &world_, entity, world_.template componentTypeId<Store>().value_or(0), archetypeId, chunkIndex, row } };
             }
         }
         else {
@@ -260,7 +262,7 @@ private:
             else {
                 auto* ptr = reinterpret_cast<Store*>(World::componentPtr(chunk, column, row, size));
                 auto type = world_.template componentTypeId<Store>();
-                return WriteRef<Store>{ ptr, &world_, entity, type.value_or(0) };
+                return WriteRef<Store>{ ptr, &world_, entity, type.value_or(0), archetypeId, chunkIndex, row };
             }
         }
     }
@@ -268,6 +270,8 @@ private:
     template <typename Fn, size_t... Is>
     void invokeEach(Fn&& fn,
         Entity entity,
+        uint32_t archetypeId,
+        uint32_t chunkIndex,
         auto& chunk,
         uint32_t row,
         const std::array<size_t, sizeof...(Ts)>& columns,
@@ -275,7 +279,7 @@ private:
         const std::array<bool, sizeof...(Ts)>& present,
         std::index_sequence<Is...>)
     {
-        std::forward<Fn>(fn)(entity, argFrom<Ts>(entity, chunk, row, columns[Is], sizes[Is], present[Is])...);
+        std::forward<Fn>(fn)(entity, argFrom<Ts>(entity, chunk, archetypeId, chunkIndex, row, columns[Is], sizes[Is], present[Is])...);
     }
 
     template <typename T>
@@ -285,7 +289,7 @@ private:
         using Store = QueryStorage<Raw>;
         if constexpr (QueryArg<Raw>::kOptional) {
             if (!present) {
-                return static_cast<QueryPointer<Raw>>(nullptr);
+                return OptionalWriteRef<Store>{};
             }
             return reinterpret_cast<QueryPointer<Raw>>(World::componentPtr(chunk, column, 0, size));
         }
@@ -361,7 +365,7 @@ public:
                 const auto& chunk = archetype.chunks[chunkIndex];
                 for (uint32_t row = 0; row < chunk.count; ++row) {
                     const Entity entity = chunk.entities[row];
-                    invokeEach(std::forward<Fn>(fn), entity, chunk, row, columns, sizes, present, std::index_sequence_for<Ts...>{});
+                    invokeEach(std::forward<Fn>(fn), entity, archetypeId, chunkIndex, chunk, row, columns, sizes, present, std::index_sequence_for<Ts...>{});
                 }
             }
         }
@@ -486,7 +490,7 @@ private:
         const std::array<bool, sizeof...(Ts)>& present,
         std::index_sequence<Is...>)
     {
-        std::forward<Fn>(fn)(entity, argFrom<Ts>(entity, chunk, row, columns[Is], sizes[Is], present[Is])...);
+        std::forward<Fn>(fn)(entity, argFrom<Ts>(entity, chunk, archetypeId, chunkIndex, row, columns[Is], sizes[Is], present[Is])...);
     }
 
     template <typename T>
