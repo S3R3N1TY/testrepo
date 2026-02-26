@@ -5,6 +5,7 @@
 #include <vulkan/SubmissionScheduler.h>
 #include <vulkan/SwapchainResources.h>
 #include <vulkan/VkCommands.h>
+#include <vulkan/VkBuffer.h>
 #include <vulkan/VkPipeline.h>
 #include <vulkan/VkShaderModule.h>
 #include <vulkan/VkSync.h>
