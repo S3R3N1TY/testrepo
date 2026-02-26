@@ -465,7 +465,30 @@ struct RenderSubsystem {
         rpBegin.clearValueCount = 2;
         rpBegin.pClearValues = clearValues;
 
-        vkCmdBeginRenderPass(primary, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+        VkSubpassContents subpassContents = VK_SUBPASS_CONTENTS_INLINE;
+        if (!secondaryBuffers.empty()) {
+#if defined(VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS)
+            subpassContents = drawImGui
+                ? VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS
+                : VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS;
+#elif defined(VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_KHR)
+            subpassContents = drawImGui
+                ? VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_KHR
+                : VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS;
+#elif defined(VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_EXT)
+            subpassContents = drawImGui
+                ? VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_EXT
+                : VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS;
+#else
+            if (drawImGui) {
+                throw std::runtime_error(
+                    "Mixed inline + secondary subpass recording requires Vulkan headers with INLINE_AND_SECONDARY support.");
+            }
+            subpassContents = VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS;
+#endif
+        }
+
+        vkCmdBeginRenderPass(primary, &rpBegin, subpassContents);
 
         if (!secondaryBuffers.empty()) {
             vkCmdExecuteCommands(primary, static_cast<uint32_t>(secondaryBuffers.size()), secondaryBuffers.data());
