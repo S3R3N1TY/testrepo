@@ -36,4 +36,11 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glm)
 
+FetchContent_Declare(
+  imgui
+  GIT_REPOSITORY https://github.com/ocornut/imgui.git
+  GIT_TAG v1.91.8
+)
+FetchContent_MakeAvailable(imgui)
+
 add_subdirectory(src)

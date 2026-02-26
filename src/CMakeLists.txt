@@ -4,6 +4,12 @@
 # Engine library
 # -----------------------------
 add_library(engine STATIC
+  ${imgui_SOURCE_DIR}/imgui.cpp
+  ${imgui_SOURCE_DIR}/imgui_draw.cpp
+  ${imgui_SOURCE_DIR}/imgui_tables.cpp
+  ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
   engine/source/Engine.cpp
   engine/source/vulkan/DeletionQueue.cpp
   engine/source/vulkan/DeferredDeletionService.cpp
@@ -30,6 +36,8 @@ target_include_directories(engine
     ${CMAKE_CURRENT_SOURCE_DIR}/engine/include
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/engine/include/vulkan
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
 )
 
 target_compile_features(engine PUBLIC cxx_std_23)
@@ -57,11 +65,15 @@ endif()
 add_executable(app
   app/main.cpp
   app/Simulation.cpp
+  app/scenes/SpinningTriangleScene.cpp
+  app/scenes/SpinningSquareScene.cpp
   app/ecs/systems/SpinningSys.cpp
   app/ecs/systems/RenderExtractSys.cpp
 )
 
 target_compile_features(app PRIVATE cxx_std_23)
+target_include_directories(app PRIVATE ${imgui_SOURCE_DIR})
+
 target_link_libraries(app PRIVATE engine)
 
 # -----------------------------

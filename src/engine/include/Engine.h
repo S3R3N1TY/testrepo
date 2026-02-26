@@ -40,6 +40,7 @@ class IGameSimulation {
 public:
     virtual ~IGameSimulation() = default;
     virtual void tick(const SimulationFrameInput& input) = 0;
+    virtual void drawMainMenuBar() {}
     [[nodiscard]] virtual FrameGraphInput buildFrameGraphInput() const = 0;
 };
 

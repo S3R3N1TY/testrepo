@@ -12,6 +12,10 @@
 
 #include <GLFW/glfw3.h>
 
+#include <imgui.h>
+#include <backends/imgui_impl_glfw.h>
+#include <backends/imgui_impl_vulkan.h>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -146,6 +150,27 @@ std::vector<VulkanSemaphore> createPerImagePresentSemaphores(VkDevice device, ui
         semaphores.emplace_back(device);
     }
     return semaphores;
+}
+
+VkDescriptorPool createImGuiDescriptorPool(VkDevice device)
+{
+    std::array<VkDescriptorPoolSize, 1> poolSizes{
+        VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 128 }
+    };
+
+    VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolInfo.maxSets = 128;
+    poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+    poolInfo.pPoolSizes = poolSizes.data();
+
+    VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+    const VkResult createResult = vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool);
+    if (createResult != VK_SUCCESS) {
+        vkutil::throwVkError("vkCreateDescriptorPool(ImGui)", createResult);
+    }
+
+    return descriptorPool;
 }
 
 void ensure(const vkutil::VkExpected<void>& result, const char* op)
@@ -408,7 +433,8 @@ struct RenderSubsystem {
         const RenderTaskGraph::BarrierBatch& incomingBarriers,
         const RenderTaskGraph::BarrierBatch& outgoingBarriers,
         bool useSync2,
-        const std::vector<VkCommandBuffer>& secondaryBuffers)
+        const std::vector<VkCommandBuffer>& secondaryBuffers,
+        bool drawImGui)
     {
         emitBarrierBatch(primary, incomingBarriers, useSync2);
 
@@ -439,10 +465,14 @@ struct RenderSubsystem {
         rpBegin.clearValueCount = 2;
         rpBegin.pClearValues = clearValues;
 
-        vkCmdBeginRenderPass(primary, &rpBegin, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+        vkCmdBeginRenderPass(primary, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
         if (!secondaryBuffers.empty()) {
             vkCmdExecuteCommands(primary, static_cast<uint32_t>(secondaryBuffers.size()), secondaryBuffers.data());
+        }
+
+        if (drawImGui) {
+            ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), primary);
         }
 
         vkCmdEndRenderPass(primary);
@@ -511,6 +541,75 @@ private:
             swapchain.depthFormat(),
             VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         swapchain.buildFramebuffers(deviceContext, renderPass.get());
+
+        VkDescriptorPool imguiDescriptorPool = createImGuiDescriptorPool(deviceContext.vkDevice());
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGui::StyleColorsDark();
+
+        if (!ImGui_ImplGlfw_InitForVulkan(window_, true)) {
+            throw std::runtime_error("ImGui_ImplGlfw_InitForVulkan failed");
+        }
+
+        ImGui_ImplVulkan_InitInfo imguiInitInfo{};
+        imguiInitInfo.Instance = deviceContext.vkInstance();
+        imguiInitInfo.PhysicalDevice = deviceContext.vkPhysical();
+        imguiInitInfo.Device = deviceContext.vkDevice();
+        imguiInitInfo.QueueFamily = deviceContext.graphicsFamilyIndex();
+        imguiInitInfo.Queue = deviceContext.graphicsQueue().get();
+        imguiInitInfo.DescriptorPool = imguiDescriptorPool;
+        imguiInitInfo.MinImageCount = swapchain.imageCount();
+        imguiInitInfo.ImageCount = swapchain.imageCount();
+        imguiInitInfo.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+        imguiInitInfo.CheckVkResultFn = +[](VkResult err) {
+            if (err != VK_SUCCESS) {
+                vkutil::throwVkError("ImGui Vulkan backend", err);
+            }
+        };
+
+        if (!ImGui_ImplVulkan_Init(&imguiInitInfo, renderPass.get())) {
+            throw std::runtime_error("ImGui_ImplVulkan_Init failed");
+        }
+
+        {
+            VkCommandPoolCreateInfo commandPoolCi{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+            commandPoolCi.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+            commandPoolCi.queueFamilyIndex = deviceContext.graphicsFamilyIndex();
+
+            VkCommandPool commandPool = VK_NULL_HANDLE;
+            const VkResult cpResult = vkCreateCommandPool(deviceContext.vkDevice(), &commandPoolCi, nullptr, &commandPool);
+            if (cpResult != VK_SUCCESS) {
+                vkutil::throwVkError("vkCreateCommandPool(ImGui)", cpResult);
+            }
+
+            VkCommandBufferAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+            allocInfo.commandPool = commandPool;
+            allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            allocInfo.commandBufferCount = 1;
+
+            VkCommandBuffer cmd = VK_NULL_HANDLE;
+            const VkResult allocRes = vkAllocateCommandBuffers(deviceContext.vkDevice(), &allocInfo, &cmd);
+            if (allocRes != VK_SUCCESS) {
+                vkDestroyCommandPool(deviceContext.vkDevice(), commandPool, nullptr);
+                vkutil::throwVkError("vkAllocateCommandBuffers(ImGui)", allocRes);
+            }
+
+            VkCommandBufferBeginInfo beginInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+            beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            vkBeginCommandBuffer(cmd, &beginInfo);
+            ImGui_ImplVulkan_CreateFontsTexture(cmd);
+            vkEndCommandBuffer(cmd);
+
+            VkSubmitInfo submitInfo{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+            submitInfo.commandBufferCount = 1;
+            submitInfo.pCommandBuffers = &cmd;
+
+            vkQueueSubmit(deviceContext.graphicsQueue().get(), 1, &submitInfo, VK_NULL_HANDLE);
+            vkQueueWaitIdle(deviceContext.graphicsQueue().get());
+            ImGui_ImplVulkan_DestroyFontUploadObjects();
+
+            vkDestroyCommandPool(deviceContext.vkDevice(), commandPool, nullptr);
+        }
 
         VulkanPipelineLayout pipelineLayout(
             deviceContext.vkDevice(),
@@ -651,10 +750,17 @@ private:
             const float deltaSeconds = std::chrono::duration<float>(now - previousTick).count();
             previousTick = now;
 
+            ImGui_ImplVulkan_NewFrame();
+            ImGui_ImplGlfw_NewFrame();
+            ImGui::NewFrame();
+
             game.tick(SimulationFrameInput{
                 .deltaSeconds = deltaSeconds,
                 .frameIndex = frameIndex
                 });
+            game.drawMainMenuBar();
+            ImGui::Render();
+
             const FrameGraphInput frameGraphInput = game.buildFrameGraphInput();
             validateFrameGraphInput(frameGraphInput);
 
@@ -695,6 +801,7 @@ private:
                     swapchain.recreateBase(deviceContext, static_cast<uint32_t>(fbWidth), static_cast<uint32_t>(fbHeight), garbage);
                     swapchain.buildFramebuffers(deviceContext, renderPass.get());
                     presentFinishedByImage = createPerImagePresentSemaphores(deviceContext.vkDevice(), swapchain.imageCount());
+                    ImGui_ImplVulkan_SetMinImageCount(swapchain.imageCount());
                 }
                 continue;
             }
@@ -919,7 +1026,8 @@ private:
                         incomingBarriers,
                         outgoingBarriers,
                         useSync2,
-                        secondaries);
+                        secondaries,
+                        true);
 
                     return graphicsArena.endBorrowed(*graphicsPrimary);
                 }
@@ -953,6 +1061,7 @@ private:
                     swapchain.recreateBase(deviceContext, static_cast<uint32_t>(fbWidth), static_cast<uint32_t>(fbHeight), garbage);
                     swapchain.buildFramebuffers(deviceContext, renderPass.get());
                     presentFinishedByImage = createPerImagePresentSemaphores(deviceContext.vkDevice(), swapchain.imageCount());
+                    ImGui_ImplVulkan_SetMinImageCount(swapchain.imageCount());
                 }
             }
             else if (presentResult != VK_SUCCESS) {
@@ -965,6 +1074,11 @@ private:
         if (!deviceContext.waitDeviceIdle()) {
             throw std::runtime_error("waitDeviceIdle failed");
         }
+
+        ImGui_ImplVulkan_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+        vkDestroyDescriptorPool(deviceContext.vkDevice(), imguiDescriptorPool, nullptr);
     }
 
     Engine::RunConfig config_{};
