@@ -6,6 +6,7 @@
 #include "ecs/systems/RenderExtractSys.h"
 #include "ecs/systems/SpinningSys.h"
 #include "scenes/Scene.h"
+#include "scenes/SphereScene.h"
 #include "scenes/SpinningSquareScene.h"
 #include "scenes/SpinningTriangleScene.h"
 
@@ -33,4 +34,6 @@ private:
 
     mutable FrameGraphInput cachedFrameGraphInput_{};
     mutable bool frameGraphDirty_{ true };
+
+    std::vector<VertexPacket> vertexPackets_{};
 };

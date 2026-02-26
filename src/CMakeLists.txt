@@ -67,8 +67,10 @@ add_executable(app
   app/Simulation.cpp
   app/scenes/SpinningTriangleScene.cpp
   app/scenes/SpinningSquareScene.cpp
+  app/scenes/SphereScene.cpp
   app/ecs/systems/SpinningSys.cpp
   app/ecs/systems/RenderExtractSys.cpp
+  app/assets/GlbLoader.cpp
 )
 
 target_compile_features(app PRIVATE cxx_std_23)

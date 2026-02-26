@@ -1,11 +1,35 @@
 #include "Simulation.h"
 
+#include "assets/GlbLoader.h"
+
 #include <imgui.h>
 
-Simulation::Simulation()
+namespace {
+std::vector<VertexPacket> buildBaseVertices()
 {
+    return {
+        VertexPacket{ .position = { 0.0F, -0.5F, 0.0F }, .color = { 1.0F, 0.0F, 0.0F } },
+        VertexPacket{ .position = { 0.5F, 0.5F, 0.0F }, .color = { 0.0F, 1.0F, 0.0F } },
+        VertexPacket{ .position = { -0.5F, 0.5F, 0.0F }, .color = { 0.0F, 0.0F, 1.0F } },
+
+        VertexPacket{ .position = { -0.5F, -0.5F, 0.0F }, .color = { 1.0F, 0.0F, 0.0F } },
+        VertexPacket{ .position = { 0.5F, -0.5F, 0.0F }, .color = { 0.0F, 1.0F, 0.0F } },
+        VertexPacket{ .position = { 0.5F, 0.5F, 0.0F }, .color = { 0.0F, 0.0F, 1.0F } },
+        VertexPacket{ .position = { 0.5F, 0.5F, 0.0F }, .color = { 0.0F, 0.0F, 1.0F } },
+        VertexPacket{ .position = { -0.5F, 0.5F, 0.0F }, .color = { 1.0F, 1.0F, 0.0F } },
+        VertexPacket{ .position = { -0.5F, -0.5F, 0.0F }, .color = { 1.0F, 0.0F, 0.0F } },
+    };
+}
+}
+
+Simulation::Simulation()
+    : vertexPackets_(buildBaseVertices())
+{
+    const LoadedMesh sphereMesh = appendGlbMeshVertices("assets/models/Sphere.glb", vertexPackets_);
+
     scenes_.emplace_back(std::make_unique<SpinningTriangleScene>());
     scenes_.emplace_back(std::make_unique<SpinningSquareScene>());
+    scenes_.emplace_back(std::make_unique<SphereScene>(sphereMesh.firstVertex, sphereMesh.vertexCount));
     switchToScene(0);
 }
 
@@ -55,6 +79,7 @@ FrameGraphInput Simulation::buildFrameGraphInput() const
 {
     if (frameGraphDirty_) {
         cachedFrameGraphInput_ = renderExtractSys_.build(world_);
+        cachedFrameGraphInput_.vertexPackets = vertexPackets_;
         frameGraphDirty_ = false;
     }
     return cachedFrameGraphInput_;

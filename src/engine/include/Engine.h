@@ -4,6 +4,11 @@
 #include <cstdint>
 #include <vector>
 
+struct VertexPacket {
+    std::array<float, 3> position{ 0.0F, 0.0F, 0.0F };
+    std::array<float, 3> color{ 1.0F, 1.0F, 1.0F };
+};
+
 struct SimulationFrameInput {
     float deltaSeconds{ 0.0F };
     uint64_t frameIndex{ 0 };
@@ -25,13 +30,14 @@ struct DrawPacket {
     uint32_t materialId{ 0 };
     uint32_t vertexCount{ 3 };
     uint32_t firstVertex{ 0 };
-    float angleRadians{ 0.0F };
+    std::array<float, 16> mvp{};
 };
 
 struct FrameGraphInput {
     std::vector<RenderViewPacket> views{};
     std::vector<MaterialBatchPacket> materialBatches{};
     std::vector<DrawPacket> drawPackets{};
+    std::vector<VertexPacket> vertexPackets{};
     bool runTransferStage{ true };
     bool runComputeStage{ true };
 };
