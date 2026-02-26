@@ -121,6 +121,10 @@ add_custom_command(TARGET app POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory
           "${APP_SHADER_GEN_DIR}"
           "$<TARGET_FILE_DIR:app>/shaders"
+  COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:app>/assets"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_SOURCE_DIR}/assets"
+          "$<TARGET_FILE_DIR:app>/assets"
 )
 
 # Give the app stable runtime-relative shader paths
