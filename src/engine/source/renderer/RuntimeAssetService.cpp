@@ -7,15 +7,15 @@
 #include <array>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <optional>
 #include <thread>
 #include <unordered_map>
 
 namespace {
-constexpr std::array<const char*, 3> kDefaultAssetDatabaseCandidates{
+constexpr std::array<const char*, 2> kDefaultAssetDatabaseCandidates{
     "content/render_assets.db",
-    "src/content/render_assets.db",
-    "/workspace/testrepo/src/content/render_assets.db"
+    "src/content/render_assets.db"
 };
 
 constexpr const char* kDefaultHttpBootstrapUrl = "http://127.0.0.1:8080/runtime-assets/bootstrap";
@@ -72,6 +72,32 @@ constexpr std::chrono::milliseconds kBackendRetryBackoff{ 25 };
         return v == "prod" || v == "production";
     }
     return false;
+}
+
+[[nodiscard]] std::vector<std::string> buildAssetDatabaseCandidates()
+{
+    std::vector<std::string> paths{};
+    paths.reserve(kDefaultAssetDatabaseCandidates.size() + 6);
+
+    if (const auto explicitDbPath = readEnvVar("RUNTIME_ASSET_DB_PATH"); explicitDbPath.has_value()) {
+        paths.push_back(*explicitDbPath);
+    }
+
+    for (const char* candidate : kDefaultAssetDatabaseCandidates) {
+        paths.emplace_back(candidate);
+    }
+
+    const std::filesystem::path sourceFile{ __FILE__ };
+    const std::filesystem::path sourceTreeDb = sourceFile.parent_path().parent_path().parent_path() / "content" / "render_assets.db";
+    paths.push_back(sourceTreeDb.lexically_normal().string());
+
+    const std::filesystem::path cwd = std::filesystem::current_path();
+    paths.push_back((cwd / "content" / "render_assets.db").lexically_normal().string());
+    paths.push_back((cwd / "src" / "content" / "render_assets.db").lexically_normal().string());
+
+    std::sort(paths.begin(), paths.end());
+    paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
+    return paths;
 }
 
 [[nodiscard]] RuntimeAssetService::MeshRecord toMeshRecord(const RuntimeAssetBackend::MeshRecord& mesh)
@@ -132,13 +158,7 @@ bool RuntimeAssetService::initializeDefaultBackend()
         return false;
     }
 
-    std::vector<std::string> paths{};
-    paths.reserve(kDefaultAssetDatabaseCandidates.size());
-    for (const char* candidate : kDefaultAssetDatabaseCandidates) {
-        paths.emplace_back(candidate);
-    }
-
-    auto fileBackend = std::make_shared<FileRuntimeAssetBackend>(std::move(paths));
+    auto fileBackend = std::make_shared<FileRuntimeAssetBackend>(buildAssetDatabaseCandidates());
     if (!fileBackend->fetchBootstrapSnapshot().has_value()) {
         return false;
     }
