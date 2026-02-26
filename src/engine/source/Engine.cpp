@@ -382,6 +382,13 @@ struct ComputeSubsystem {
 };
 
 struct RenderSubsystem {
+    static constexpr bool kSupportsInlineAndSecondarySubpassContents =
+#if defined(VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS) || defined(VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_KHR) || defined(VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_EXT)
+        true;
+#else
+        false;
+#endif
+
     [[nodiscard]] static std::optional<RenderViewPacket> chooseView(const FrameGraphInput& frameGraphInput)
     {
         if (!frameGraphInput.views.empty()) {
@@ -422,6 +429,11 @@ struct RenderSubsystem {
             vkCmdPushConstants(secondary, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float), &draw.angleRadians);
             vkCmdDraw(secondary, draw.vertexCount, 1, draw.firstVertex, 0);
         }
+    }
+
+    static void recordImGuiSecondary(VkCommandBuffer secondary)
+    {
+        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), secondary);
     }
 
     static void recordPrimaryWithSecondaries(
@@ -480,10 +492,6 @@ struct RenderSubsystem {
                 ? VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_EXT
                 : VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS;
 #else
-            if (drawImGui) {
-                throw std::runtime_error(
-                    "Mixed inline + secondary subpass recording requires Vulkan headers with INLINE_AND_SECONDARY support.");
-            }
             subpassContents = VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS;
 #endif
         }
@@ -494,7 +502,7 @@ struct RenderSubsystem {
             vkCmdExecuteCommands(primary, static_cast<uint32_t>(secondaryBuffers.size()), secondaryBuffers.data());
         }
 
-        if (drawImGui) {
+        if (drawImGui && (secondaryBuffers.empty() || kSupportsInlineAndSecondarySubpassContents)) {
             ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), primary);
         }
 
@@ -1001,6 +1009,27 @@ private:
 
                     if (firstError.has_value()) {
                         return vkutil::VkExpected<void>(firstError.value());
+                    }
+
+                    if (!RenderSubsystem::kSupportsInlineAndSecondarySubpassContents) {
+                        auto imguiSecondary = graphicsArena.acquireSecondary(
+                            graphicsToken.value(),
+                            inheritance,
+                            workerCount,
+                            VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+                            VulkanCommandArena::SecondaryRecordingMode::LegacyRenderPass);
+                        if (!imguiSecondary.hasValue()) {
+                            return vkutil::VkExpected<void>(imguiSecondary.context());
+                        }
+
+                        RenderSubsystem::recordImGuiSecondary(imguiSecondary.value().handle);
+
+                        auto imguiEndResult = graphicsArena.endBorrowed(imguiSecondary.value());
+                        if (!imguiEndResult.hasValue()) {
+                            return vkutil::VkExpected<void>(imguiEndResult.context());
+                        }
+
+                        secondaries.push_back(imguiSecondary.value().handle);
                     }
 
                     RenderSubsystem::recordPrimaryWithSecondaries(
