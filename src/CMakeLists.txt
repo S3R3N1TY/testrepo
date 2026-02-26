@@ -46,8 +46,11 @@ target_compile_definitions(engine
 )
 
 target_link_libraries(engine
-  PUBLIC glm::glm
-  PRIVATE Vulkan::Vulkan glfw
+  PUBLIC
+    glm::glm
+    Vulkan::Vulkan
+  PRIVATE
+    glfw
 )
 
 if(MSVC)
