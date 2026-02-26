@@ -1,36 +1,53 @@
 #include "Simulation.h"
 
-#include "ecs/components/PositionComp.h"
-#include "ecs/components/RenderComp.h"
-#include "ecs/components/RotationComp.h"
-#include "ecs/components/ScaleComp.h"
+#include <imgui.h>
 
 Simulation::Simulation()
 {
-    createInitialScene();
+    scenes_.emplace_back(std::make_unique<SpinningTriangleScene>());
+    scenes_.emplace_back(std::make_unique<SpinningSquareScene>());
+    switchToScene(0);
 }
 
-void Simulation::createInitialScene()
+void Simulation::switchToScene(size_t sceneIndex)
 {
-    const Entity triangle = world_.createEntity();
-    world_.emplaceComponent<PositionComp>(triangle);
-    world_.emplaceComponent<ScaleComp>(triangle);
-    world_.emplaceComponent<RotationComp>(triangle, RotationComp{
-        .angleRadians = 0.0F,
-        .angularVelocityRadiansPerSecond = 1.0F });
-    world_.emplaceComponent<RenderComp>(triangle, RenderComp{
-        .viewId = 0,
-        .materialId = 1,
-        .vertexCount = 3,
-        .firstVertex = 0,
-        .visible = true,
-        .overrideClearColor = true,
-        .clearColor = { 0.02F, 0.02F, 0.08F, 1.0F } });
+    if (sceneIndex >= scenes_.size()) {
+        return;
+    }
+
+    if (hasActiveScene_) {
+        scenes_[activeSceneIndex_]->onUnload(world_);
+    }
+    activeSceneIndex_ = sceneIndex;
+    scenes_[activeSceneIndex_]->onLoad(world_);
+    hasActiveScene_ = true;
+    frameGraphDirty_ = true;
+}
+
+void Simulation::drawMainMenuBar()
+{
+    if (!ImGui::BeginMainMenuBar()) {
+        return;
+    }
+
+    if (ImGui::BeginMenu("Scenario")) {
+        for (size_t i = 0; i < scenes_.size(); ++i) {
+            const bool selected = (i == activeSceneIndex_);
+            if (ImGui::MenuItem(scenes_[i]->name(), nullptr, selected)) {
+                switchToScene(i);
+            }
+        }
+        ImGui::EndMenu();
+    }
+
+    ImGui::EndMainMenuBar();
 }
 
 void Simulation::tick(const SimulationFrameInput& input)
 {
+    scenes_[activeSceneIndex_]->onUpdate(world_, input);
     spinningSys_.update(world_, input);
+    scenes_[activeSceneIndex_]->onDraw(world_);
     frameGraphDirty_ = true;
 }
 
