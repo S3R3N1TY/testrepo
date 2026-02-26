@@ -2,6 +2,7 @@
 #include <vulkan/RenderGraph.h>
 
 #include <cassert>
+#include <cstdint>
 
 int main()
 {
@@ -34,15 +35,19 @@ int main()
     // Owned persistent lifecycle semantics: create/recreate/release.
     uint32_t imageCreateCount = 0;
     uint32_t imageDestroyCount = 0;
-    const bool ownedImageCreated = service.ensureOwnedImage(100u, PersistentResourceService::OwnedImageSpec{
-        .create = [&]() -> std::optional<PersistentResourceService::ImageBinding> {
-            ++imageCreateCount;
-            return PersistentResourceService::ImageBinding{ .image = reinterpret_cast<VkImage>(0x1000 + imageCreateCount), .subresourceRange = range };
-        },
-        .destroy = [&](const PersistentResourceService::ImageBinding&) {
-            ++imageDestroyCount;
-        }
-    });
+    PersistentResourceService::OwnedImageSpec ownedImageSpec{};
+    ownedImageSpec.create = [&]() -> std::optional<PersistentResourceService::ImageBinding> {
+        ++imageCreateCount;
+        PersistentResourceService::ImageBinding created{};
+        created.image = reinterpret_cast<VkImage>(static_cast<uintptr_t>(0x1000u + imageCreateCount));
+        created.subresourceRange = range;
+        return created;
+    };
+    ownedImageSpec.destroy = [&](const PersistentResourceService::ImageBinding&) {
+        ++imageDestroyCount;
+    };
+
+    const bool ownedImageCreated = service.ensureOwnedImage(100u, std::move(ownedImageSpec));
     assert(ownedImageCreated);
     auto ownedImage = service.resolveImage(100u);
     assert(ownedImage.has_value());
@@ -60,19 +65,20 @@ int main()
 
     uint32_t bufferCreateCount = 0;
     uint32_t bufferDestroyCount = 0;
-    const bool ownedBufferCreated = service.ensureOwnedBuffer(200u, PersistentResourceService::OwnedBufferSpec{
-        .create = [&]() -> std::optional<PersistentResourceService::BufferBinding> {
-            ++bufferCreateCount;
-            return PersistentResourceService::BufferBinding{
-                .buffer = reinterpret_cast<VkBuffer>(0x2000 + bufferCreateCount),
-                .offset = 16,
-                .size = 64
-            };
-        },
-        .destroy = [&](const PersistentResourceService::BufferBinding&) {
-            ++bufferDestroyCount;
-        }
-    });
+    PersistentResourceService::OwnedBufferSpec ownedBufferSpec{};
+    ownedBufferSpec.create = [&]() -> std::optional<PersistentResourceService::BufferBinding> {
+        ++bufferCreateCount;
+        PersistentResourceService::BufferBinding created{};
+        created.buffer = reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(0x2000u + bufferCreateCount));
+        created.offset = 16;
+        created.size = 64;
+        return created;
+    };
+    ownedBufferSpec.destroy = [&](const PersistentResourceService::BufferBinding&) {
+        ++bufferDestroyCount;
+    };
+
+    const bool ownedBufferCreated = service.ensureOwnedBuffer(200u, std::move(ownedBufferSpec));
     assert(ownedBufferCreated);
     const bool ownedBufferRecreated = service.recreateOwnedBuffer(200u);
     assert(ownedBufferRecreated);
