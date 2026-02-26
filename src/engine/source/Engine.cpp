@@ -558,6 +558,7 @@ private:
         imguiInitInfo.QueueFamily = deviceContext.graphicsFamilyIndex();
         imguiInitInfo.Queue = deviceContext.graphicsQueue().get();
         imguiInitInfo.DescriptorPool = imguiDescriptorPool;
+        imguiInitInfo.RenderPass = renderPass.get();
         imguiInitInfo.MinImageCount = swapchain.imageCount();
         imguiInitInfo.ImageCount = swapchain.imageCount();
         imguiInitInfo.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
@@ -567,49 +568,11 @@ private:
             }
         };
 
-        if (!ImGui_ImplVulkan_Init(&imguiInitInfo, renderPass.get())) {
+        if (!ImGui_ImplVulkan_Init(&imguiInitInfo)) {
             throw std::runtime_error("ImGui_ImplVulkan_Init failed");
         }
 
-        {
-            VkCommandPoolCreateInfo commandPoolCi{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
-            commandPoolCi.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-            commandPoolCi.queueFamilyIndex = deviceContext.graphicsFamilyIndex();
-
-            VkCommandPool commandPool = VK_NULL_HANDLE;
-            const VkResult cpResult = vkCreateCommandPool(deviceContext.vkDevice(), &commandPoolCi, nullptr, &commandPool);
-            if (cpResult != VK_SUCCESS) {
-                vkutil::throwVkError("vkCreateCommandPool(ImGui)", cpResult);
-            }
-
-            VkCommandBufferAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-            allocInfo.commandPool = commandPool;
-            allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-            allocInfo.commandBufferCount = 1;
-
-            VkCommandBuffer cmd = VK_NULL_HANDLE;
-            const VkResult allocRes = vkAllocateCommandBuffers(deviceContext.vkDevice(), &allocInfo, &cmd);
-            if (allocRes != VK_SUCCESS) {
-                vkDestroyCommandPool(deviceContext.vkDevice(), commandPool, nullptr);
-                vkutil::throwVkError("vkAllocateCommandBuffers(ImGui)", allocRes);
-            }
-
-            VkCommandBufferBeginInfo beginInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-            beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-            vkBeginCommandBuffer(cmd, &beginInfo);
-            ImGui_ImplVulkan_CreateFontsTexture(cmd);
-            vkEndCommandBuffer(cmd);
-
-            VkSubmitInfo submitInfo{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-            submitInfo.commandBufferCount = 1;
-            submitInfo.pCommandBuffers = &cmd;
-
-            vkQueueSubmit(deviceContext.graphicsQueue().get(), 1, &submitInfo, VK_NULL_HANDLE);
-            vkQueueWaitIdle(deviceContext.graphicsQueue().get());
-            ImGui_ImplVulkan_DestroyFontUploadObjects();
-
-            vkDestroyCommandPool(deviceContext.vkDevice(), commandPool, nullptr);
-        }
+        ImGui_ImplVulkan_CreateFontsTexture();
 
         VulkanPipelineLayout pipelineLayout(
             deviceContext.vkDevice(),
