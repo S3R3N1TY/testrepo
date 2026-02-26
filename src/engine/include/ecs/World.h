@@ -491,6 +491,12 @@ private:
     };
 
     struct Archetype {
+        Archetype() = default;
+        Archetype(const Archetype&) = delete;
+        Archetype& operator=(const Archetype&) = delete;
+        Archetype(Archetype&&) noexcept = default;
+        Archetype& operator=(Archetype&&) noexcept = default;
+
         ArchetypeKey key{};
         std::unordered_map<ComponentTypeId, size_t> columnByType{};
         std::vector<Chunk> chunks{};
