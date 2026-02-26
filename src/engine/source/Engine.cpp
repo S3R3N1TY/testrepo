@@ -20,6 +20,8 @@
 #include <array>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <iostream>
@@ -275,6 +277,10 @@ void validateFrameGraphInput(const FrameGraphInput& frameGraphInput)
         if (!materialIds.empty() && !materialIds.contains(draw.materialId)) {
             throw std::runtime_error("DrawPacket references unknown materialId");
         }
+        const uint64_t vertexEnd = static_cast<uint64_t>(draw.firstVertex) + static_cast<uint64_t>(draw.vertexCount);
+        if (vertexEnd > frameGraphInput.vertexPackets.size()) {
+            throw std::runtime_error("DrawPacket vertex range exceeds vertexPackets size");
+        }
     }
 }
 
@@ -407,6 +413,7 @@ struct RenderSubsystem {
         VkCommandBuffer secondary,
         VkPipeline pipeline,
         VkPipelineLayout pipelineLayout,
+        VkBuffer vertexBuffer,
         VkExtent2D extent,
         const std::vector<DrawPacket>& drawPackets,
         size_t beginIndex,
@@ -424,9 +431,11 @@ struct RenderSubsystem {
         vkCmdSetScissor(secondary, 0, 1, &scissor);
 
         vkCmdBindPipeline(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        const VkDeviceSize vertexOffset = 0;
+        vkCmdBindVertexBuffers(secondary, 0, 1, &vertexBuffer, &vertexOffset);
         for (size_t i = beginIndex; i < endIndex; ++i) {
             const DrawPacket& draw = drawPackets[i];
-            vkCmdPushConstants(secondary, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float), &draw.angleRadians);
+            vkCmdPushConstants(secondary, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(draw.mvp), draw.mvp.data());
             vkCmdDraw(secondary, draw.vertexCount, 1, draw.firstVertex, 0);
         }
     }
@@ -608,7 +617,7 @@ private:
         VulkanPipelineLayout pipelineLayout(
             deviceContext.vkDevice(),
             {},
-            { VkPushConstantRange{ VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) } });
+            { VkPushConstantRange{ VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(std::array<float, 16>) } });
 
         const std::vector<char> vertShaderCode = loadShaderCode(resolveVertexShaderPath(config_));
         const std::vector<char> fragShaderCode = loadShaderCode(resolveFragmentShaderPath(config_));
@@ -628,8 +637,21 @@ private:
         fragmentStage.module = fragShader.get();
         fragmentStage.pName = "main";
 
+        VkVertexInputBindingDescription vertexBinding{};
+        vertexBinding.binding = 0;
+        vertexBinding.stride = sizeof(VertexPacket);
+        vertexBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+        std::array<VkVertexInputAttributeDescription, 2> vertexAttributes{};
+        vertexAttributes[0] = VkVertexInputAttributeDescription{ .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(VertexPacket, position) };
+        vertexAttributes[1] = VkVertexInputAttributeDescription{ .location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(VertexPacket, color) };
+
         VkPipelineVertexInputStateCreateInfo vertexInput{};
         vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertexInput.vertexBindingDescriptionCount = 1;
+        vertexInput.pVertexBindingDescriptions = &vertexBinding;
+        vertexInput.vertexAttributeDescriptionCount = static_cast<uint32_t>(vertexAttributes.size());
+        vertexInput.pVertexAttributeDescriptions = vertexAttributes.data();
 
         VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
         inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -734,6 +756,13 @@ private:
         std::vector<VulkanSemaphore> presentFinishedByImage =
             createPerImagePresentSemaphores(deviceContext.vkDevice(), swapchain.imageCount());
 
+        VulkanBuffer vertexBuffer(
+            deviceContext.vkDevice(),
+            deviceContext.vkPhysical(),
+            static_cast<VkDeviceSize>(sizeof(VertexPacket) * 100000),
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
         uint32_t frameIndex = 0;
         auto previousTick = std::chrono::steady_clock::now();
 
@@ -757,6 +786,15 @@ private:
 
             const FrameGraphInput frameGraphInput = game.buildFrameGraphInput();
             validateFrameGraphInput(frameGraphInput);
+
+            if (!frameGraphInput.vertexPackets.empty()) {
+                const VkDeviceSize uploadSize = static_cast<VkDeviceSize>(frameGraphInput.vertexPackets.size() * sizeof(VertexPacket));
+                if (uploadSize > vertexBuffer.getSize()) {
+                    throw std::runtime_error("Vertex packet stream exceeds fixed GPU buffer capacity");
+                }
+                std::memcpy(vertexBuffer.map(0, uploadSize), frameGraphInput.vertexPackets.data(), static_cast<size_t>(uploadSize));
+                vertexBuffer.unmap();
+            }
 
             const uint32_t frameSlot = frameIndex % kFramesInFlight;
             FrameData& frame = frames[frameSlot];
@@ -990,6 +1028,7 @@ private:
                             borrowed.value().handle,
                             pipeline.get(),
                             pipelineLayout.get(),
+                            vertexBuffer.get(),
                             extent,
                             frameGraphInput.drawPackets,
                             begin,

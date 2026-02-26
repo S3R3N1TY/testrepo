@@ -4,6 +4,10 @@
 #include "../components/RotationComp.h"
 
 #include <algorithm>
+#include <glm/ext/matrix_clip_space.hpp>
+#include <glm/ext/matrix_transform.hpp>
+#include <glm/glm.hpp>
+#include <glm/gtc/type_ptr.hpp>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -23,6 +27,9 @@ FrameGraphInput RenderExtractSys::build(const World& world) const
 
     std::vector<DrawBuildPacket> pendingDraws{};
 
+    const glm::mat4 projection = glm::perspective(glm::radians(55.0F), 800.0F / 600.0F, 0.1F, 100.0F);
+    const glm::mat4 view3D = glm::lookAt(glm::vec3(0.0F, 0.0F, 3.5F), glm::vec3(0.0F), glm::vec3(0.0F, 1.0F, 0.0F));
+
     world.query<RenderComp, RotationComp>().each([&](Entity entity, const RenderComp& render, const RotationComp& rotation) {
         if (!render.visible) {
             return;
@@ -35,6 +42,19 @@ FrameGraphInput RenderExtractSys::build(const World& world) const
             viewMap.emplace(render.viewId, RenderViewPacket{ .viewId = render.viewId });
         }
 
+        glm::mat4 mvp(1.0F);
+        if (render.materialId == 3) {
+            const glm::mat4 model = glm::rotate(glm::mat4(1.0F), rotation.angleRadians, glm::vec3(0.1F, 1.0F, 0.0F));
+            const glm::mat4 clipFix = glm::scale(glm::mat4(1.0F), glm::vec3(1.0F, -1.0F, 1.0F));
+            mvp = clipFix * projection * view3D * model;
+        } else {
+            mvp = glm::rotate(glm::mat4(1.0F), rotation.angleRadians, glm::vec3(0.0F, 0.0F, 1.0F));
+        }
+
+        std::array<float, 16> mvpPacked{};
+        const float* mvpData = glm::value_ptr(mvp);
+        std::copy(mvpData, mvpData + mvpPacked.size(), mvpPacked.begin());
+
         pendingDraws.push_back(DrawBuildPacket{
             .entity = entity,
             .draw = DrawPacket{
@@ -42,7 +62,7 @@ FrameGraphInput RenderExtractSys::build(const World& world) const
                 .materialId = render.materialId,
                 .vertexCount = render.vertexCount,
                 .firstVertex = render.firstVertex,
-                .angleRadians = rotation.angleRadians }
+                .mvp = mvpPacked }
             });
     });
 
