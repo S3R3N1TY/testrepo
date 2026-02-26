@@ -427,6 +427,12 @@ private:
         size_t sizeBytes{ 0 };
         size_t alignment{ 1 };
 
+        AlignedColumn() = default;
+        AlignedColumn(const AlignedColumn&) = delete;
+        AlignedColumn& operator=(const AlignedColumn&) = delete;
+        AlignedColumn(AlignedColumn&&) noexcept = default;
+        AlignedColumn& operator=(AlignedColumn&&) noexcept = default;
+
         static AlignedColumn create(size_t bytes, size_t alignment)
         {
             const size_t allocSize = bytes + alignment;
@@ -437,7 +443,12 @@ private:
             if (aligned == nullptr) {
                 throw std::runtime_error("Failed to align component column buffer");
             }
-            return AlignedColumn{ .buffer = std::move(raw), .data = static_cast<std::byte*>(aligned), .sizeBytes = bytes, .alignment = alignment };
+            AlignedColumn column{};
+            column.buffer = std::move(raw);
+            column.data = static_cast<std::byte*>(aligned);
+            column.sizeBytes = bytes;
+            column.alignment = alignment;
+            return column;
         }
     };
 
@@ -447,6 +458,11 @@ private:
             , count(0)
         {
         }
+
+        Chunk(const Chunk&) = delete;
+        Chunk& operator=(const Chunk&) = delete;
+        Chunk(Chunk&&) noexcept = default;
+        Chunk& operator=(Chunk&&) noexcept = default;
 
         std::vector<Entity> entities{};
         std::vector<AlignedColumn> columns{};
