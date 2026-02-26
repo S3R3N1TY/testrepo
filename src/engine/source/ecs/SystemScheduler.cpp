@@ -12,12 +12,11 @@ void SystemScheduler::addRead(Phase phase, AccessDeclaration access, ReadUpdateF
     if (finalized_) {
         throw std::runtime_error("SystemScheduler configuration is finalized");
     }
-    phases_[static_cast<size_t>(phase)].push_back(ScheduledSystem{
-        .access = std::move(access),
-        .readFn = std::move(fn),
-        .writeFn = {},
-        .writes = false
-    });
+    ScheduledSystem system{};
+    system.access = std::move(access);
+    system.readFn = std::move(fn);
+    system.writes = false;
+    phases_[static_cast<size_t>(phase)].emplace_back(std::move(system));
 }
 
 void SystemScheduler::addWrite(Phase phase, AccessDeclaration access, WriteUpdateFn fn)
@@ -25,12 +24,11 @@ void SystemScheduler::addWrite(Phase phase, AccessDeclaration access, WriteUpdat
     if (finalized_) {
         throw std::runtime_error("SystemScheduler configuration is finalized");
     }
-    phases_[static_cast<size_t>(phase)].push_back(ScheduledSystem{
-        .access = std::move(access),
-        .readFn = {},
-        .writeFn = std::move(fn),
-        .writes = true
-    });
+    ScheduledSystem system{};
+    system.access = std::move(access);
+    system.writeFn = std::move(fn);
+    system.writes = true;
+    phases_[static_cast<size_t>(phase)].emplace_back(std::move(system));
 }
 
 void SystemScheduler::addPhaseDependency(Phase before, Phase after)
