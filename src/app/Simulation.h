@@ -6,9 +6,7 @@
 #include "ecs/systems/RenderExtractSys.h"
 #include "ecs/systems/SpinningSys.h"
 #include "scenes/Scene.h"
-#include "scenes/SphereScene.h"
-#include "scenes/SpinningSquareScene.h"
-#include "scenes/SpinningTriangleScene.h"
+#include "scenes/TestScene.h"
 
 #include <memory>
 #include <vector>

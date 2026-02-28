@@ -65,9 +65,7 @@ endif()
 add_executable(app
   app/main.cpp
   app/Simulation.cpp
-  app/scenes/SpinningTriangleScene.cpp
-  app/scenes/SpinningSquareScene.cpp
-  app/scenes/SphereScene.cpp
+  app/scenes/TestScene.cpp
   app/ecs/systems/SpinningSys.cpp
   app/ecs/systems/RenderExtractSys.cpp
   app/assets/GlbLoader.cpp
