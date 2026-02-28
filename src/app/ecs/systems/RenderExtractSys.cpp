@@ -1,7 +1,9 @@
 #include "RenderExtractSys.h"
 
+#include "../components/PositionComp.h"
 #include "../components/RenderComp.h"
 #include "../components/RotationComp.h"
+#include "../components/ScaleComp.h"
 
 #include <algorithm>
 #include <glm/ext/matrix_clip_space.hpp>
@@ -28,9 +30,9 @@ FrameGraphInput RenderExtractSys::build(const World& world) const
     std::vector<DrawBuildPacket> pendingDraws{};
 
     const glm::mat4 projection = glm::perspective(glm::radians(55.0F), 800.0F / 600.0F, 0.1F, 100.0F);
-    const glm::mat4 view3D = glm::lookAt(glm::vec3(0.0F, 0.0F, 3.5F), glm::vec3(0.0F), glm::vec3(0.0F, 1.0F, 0.0F));
+    const glm::mat4 view3D = glm::lookAt(glm::vec3(0.0F, 1.5F, 3.5F), glm::vec3(0.0F, 0.0F, 0.0F), glm::vec3(0.0F, 1.0F, 0.0F));
 
-    world.query<RenderComp, RotationComp>().each([&](Entity entity, const RenderComp& render, const RotationComp& rotation) {
+    world.query<RenderComp>().each([&](Entity entity, const RenderComp& render) {
         if (!render.visible) {
             return;
         }
@@ -42,17 +44,32 @@ FrameGraphInput RenderExtractSys::build(const World& world) const
             viewMap.emplace(render.viewId, RenderViewPacket{ .viewId = render.viewId });
         }
 
-        glm::mat4 mvp(1.0F);
+        const PositionComp* position = world.getComponent<PositionComp>(entity);
+        const ScaleComp* scale = world.getComponent<ScaleComp>(entity);
+        const RotationComp* rotation = world.getComponent<RotationComp>(entity);
+
+        const glm::vec3 translation = position != nullptr
+            ? glm::vec3(position->x, position->y, position->z)
+            : glm::vec3(0.0F);
+        const glm::vec3 scaling = scale != nullptr
+            ? glm::vec3(scale->x, scale->y, scale->z)
+            : glm::vec3(1.0F);
+        const float angle = rotation != nullptr ? rotation->angleRadians : 0.0F;
+
+        glm::mat4 model = glm::translate(glm::mat4(1.0F), translation);
         if (render.materialId == 3) {
-            const glm::mat4 model = glm::rotate(glm::mat4(1.0F), rotation.angleRadians, glm::vec3(0.1F, 1.0F, 0.0F));
+            model = glm::rotate(model, angle, glm::vec3(0.1F, 1.0F, 0.0F));
+            model = glm::scale(model, scaling);
+
             const glm::mat4 clipFix = glm::scale(glm::mat4(1.0F), glm::vec3(1.0F, -1.0F, 1.0F));
-            mvp = clipFix * projection * view3D * model;
+            model = clipFix * projection * view3D * model;
         } else {
-            mvp = glm::rotate(glm::mat4(1.0F), rotation.angleRadians, glm::vec3(0.0F, 0.0F, 1.0F));
+            model = glm::rotate(model, angle, glm::vec3(0.0F, 0.0F, 1.0F));
+            model = glm::scale(model, scaling);
         }
 
         std::array<float, 16> mvpPacked{};
-        const float* mvpData = glm::value_ptr(mvp);
+        const float* mvpData = glm::value_ptr(model);
         std::copy(mvpData, mvpData + mvpPacked.size(), mvpPacked.begin());
 
         pendingDraws.push_back(DrawBuildPacket{
