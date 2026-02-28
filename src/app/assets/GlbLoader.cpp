@@ -222,6 +222,19 @@ std::array<float, 3> readVec3(const std::vector<uint8_t>& binChunk, const Access
     return out;
 }
 
+std::array<float, 3> readColor(const std::vector<uint8_t>& binChunk, const AccessorView& view, uint32_t index)
+{
+    if (view.componentType != 5126 || (view.type != "VEC3" && view.type != "VEC4")) {
+        throw std::runtime_error("Only FLOAT VEC3/VEC4 COLOR_0 attributes are supported");
+    }
+
+    std::array<float, 4> color{};
+    const size_t offset = view.byteOffset + static_cast<size_t>(index) * view.byteStride;
+    const size_t channelCount = (view.type == "VEC4") ? 4 : 3;
+    std::memcpy(color.data(), binChunk.data() + offset, sizeof(float) * channelCount);
+    return { color[0], color[1], color[2] };
+}
+
 uint32_t readIndex(const std::vector<uint8_t>& binChunk, const AccessorView& view, uint32_t index)
 {
     const size_t offset = view.byteOffset + static_cast<size_t>(index) * view.byteStride;
@@ -291,14 +304,19 @@ LoadedMesh appendGlbMeshVertices(const std::string& path, std::vector<VertexPack
     const uint32_t positionAccessorIndex = asU32(expectField<JsonValue>(attributes, "POSITION"));
     const AccessorView positionAccessor = getAccessor(root, binChunk, positionAccessorIndex);
 
+    const bool hasColorAttribute = attributes.contains("COLOR_0");
+    const AccessorView colorAccessor = hasColorAttribute
+        ? getAccessor(root, binChunk, asU32(attributes.at("COLOR_0")))
+        : AccessorView{};
+
     const uint32_t firstVertex = static_cast<uint32_t>(outVertices.size());
 
     auto emitVertex = [&](uint32_t index) {
         const auto p = readVec3(binChunk, positionAccessor, index);
-        const float r = 0.5F + 0.5F * p[0];
-        const float g = 0.5F + 0.5F * p[1];
-        const float b = 0.5F + 0.5F * p[2];
-        outVertices.push_back(VertexPacket{ .position = p, .color = { r, g, b } });
+        const std::array<float, 3> color = hasColorAttribute
+            ? readColor(binChunk, colorAccessor, index)
+            : std::array<float, 3>{ 1.0F, 1.0F, 1.0F };
+        outVertices.push_back(VertexPacket{ .position = p, .color = color });
     };
 
     if (primitive.contains("indices")) {
