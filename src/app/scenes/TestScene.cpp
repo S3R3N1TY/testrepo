@@ -23,7 +23,7 @@ void TestScene::onLoad(World& world)
     world.emplaceComponent<ScaleComp>(plane);
     world.emplaceComponent<RenderComp>(plane, RenderComp{
         .viewId = 0,
-        .materialId = 1,
+        .materialId = 3,
         .vertexCount = vertexCount_,
         .firstVertex = firstVertex_,
         .visible = true,
